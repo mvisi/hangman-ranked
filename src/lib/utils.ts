@@ -1,164 +1,92 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { words } from "./allWords";
-import { useQuery } from "convex/react";
-import { api } from "../../convex/_generated/api";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function tryCatch<T extends (...args: any[]) => any>(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fn: T & ((...args: Parameters<T>) => Exclude<ReturnType<T>, Promise<any>>),
-  ...args: Parameters<T>
-): { data: ReturnType<T> | null; error: unknown | null } {
-  try {
-    const data = fn(...args);
-    return { data, error: null };
-  } catch (error) {
-    return { data: null, error };
-  }
-}
-
-export function formatTime(ms: number) {
-  const totalSeconds = Math.floor(ms / 1000);
+/** Compact human duration: "850ms", "12.4s", "1m 05s", "2h 03m". */
+export function formatDuration(ms: number | null | undefined) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "–";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const milliseconds = ms % 1000;
-
-  let result = "";
-  if (hours > 0) {
-    result += `${hours}h`;
-  }
-  if (minutes > 0) {
-    result += `${minutes}min `;
-  }
-  if (minutes > 0 || seconds > 0) {
-    result += `${seconds}sec `;
-  }
-  result += `${milliseconds}ms`;
-  return result.trim();
+  const seconds = Math.floor(totalSeconds % 60);
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
-export function formatDigitalTime(ms: number, includeMs?: boolean) {
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
-  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(
-    2,
-    "0"
-  );
+
+/** Stopwatch style "mm:ss" (or "h:mm:ss" past an hour). */
+export function formatClock(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
   const seconds = String(totalSeconds % 60).padStart(2, "0");
-  const milliseconds = ms % 1000;
-
-  let result = `${hours}:${minutes}:${seconds}`;
-  if (includeMs) {
-    result += `:${milliseconds.toString().padStart(3, "0")}`;
-  }
-  return result.trim();
+  return hours > 0 ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
 }
 
-export const getRandomWord = () => {
-  const filteredWords = words.filter((word) => word.length >= 5);
-  return filteredWords[Math.floor(Math.random() * filteredWords.length)];
-};
-
-export const getDisplayWord = (word: string, guesses: string[]) => {
-  if (!guesses || guesses.length === 0) {
-    return Array(word.length).fill("_") as string[];
-  }
-  return word
-    .split("")
-    .map((letter) => (guesses.includes(letter) ? letter : "_"));
-};
-
-export function toSentenceCase(key: string): string {
-  return key
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
-    .replace(/[_\-]+/g, " ")
-    .toLowerCase()
-    .replace(/^./, (str) => str.toUpperCase());
+export function formatPercent(ratio: number, digits = 0) {
+  return `${(ratio * 100).toFixed(digits)}%`;
 }
 
-export function sum(...args: (number | undefined)[]) {
-  return args.reduce((acc: number, val) => {
-    if (typeof val === "number") {
-      return acc + val;
-    }
-    return acc;
-  }, 0);
+export function formatSigned(value: number) {
+  return value > 0 ? `+${value}` : `${value}`;
 }
 
-const minute = 60 * 1000;
-const hour = 60 * minute;
-const day = 24 * hour;
-const week = 7 * day;
-const month = 30 * day; // approximate
-const year = 365 * day; // approximate
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const WEEK = 7 * DAY;
+const MONTH = 30 * DAY;
+const YEAR = 365 * DAY;
 
-export function formatLastSeen(lastSeen: number) {
-  const now = Date.now();
-
-  if (lastSeen === 0) {
-    return "Never";
-  }
-  if (lastSeen > now) {
-    const future = lastSeen - now;
-    if (future < minute) return "Just now"; // tolerate minor clock skew
-    return "Tomorrow";
-  }
-
-  const diff = now - lastSeen;
-
-  if (diff < minute) {
-    return "Just now";
-  } else if (diff < hour) {
-    const minutes = Math.floor(diff / minute);
-    return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
-  } else if (diff < day) {
-    const hours = Math.floor(diff / hour);
-    return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-  } else if (diff < week) {
-    const days = Math.floor(diff / day);
-    return `${days} ${days === 1 ? "day" : "days"} ago`;
-  } else if (diff < 4 * week) {
-    const weeks = Math.floor(diff / week);
-    return `${weeks} ${weeks === 1 ? "week" : "weeks"} ago`;
-  } else if (diff < year) {
-    const months = Math.floor(diff / month);
-    return `${months} ${months === 1 ? "month" : "months"} ago`;
-  } else {
-    const years = Math.floor(diff / year);
-    return `${years} ${years === 1 ? "year" : "years"} ago`;
-  }
-}
-
-export function getEloProgression(
-  recentGames: NonNullable<
-    Awaited<ReturnType<typeof useQuery<typeof api.user.getRecentRankedGames>>>
-  >
-) {
-  let currentElo = 1000;
-  const eloProgression = [
-    { game: 0, elo: 1000 },
-    ...recentGames
-      .slice()
-      .reverse()
-      .map(({ eloChange }, idx) => {
-        currentElo += eloChange ?? 0;
-        return { game: idx + 1, elo: currentElo }; // <-- numbers
-      }),
+/** "Just now", "5 minutes ago", "3 weeks ago"… */
+export function formatRelative(timestamp: number, now = Date.now()) {
+  if (!timestamp) return "Never";
+  const diff = now - timestamp;
+  if (diff < MINUTE) return "Just now";
+  const units: [number, string][] = [
+    [YEAR, "year"],
+    [MONTH, "month"],
+    [WEEK, "week"],
+    [DAY, "day"],
+    [HOUR, "hour"],
+    [MINUTE, "minute"],
   ];
-  return eloProgression;
+  for (const [size, label] of units) {
+    if (diff >= size) {
+      const n = Math.floor(diff / size);
+      return `${n} ${label}${n === 1 ? "" : "s"} ago`;
+    }
+  }
+  return "Just now";
 }
 
-export function getRankFromElo(elo: number) {
-  if (elo < 800) return "Beginner";
-  if (elo < 1200) return "Intermediate";
-  if (elo < 1600) return "Advanced";
-  if (elo < 2000) return "Expert";
-  if (elo < 2400) return "Master";
-  return "Grandmaster";
+export function formatDate(timestamp: number) {
+  return new Date(timestamp).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+/** Path to a player's profile page. */
+export function profileHref(name: string) {
+  return `/profile/${encodeURIComponent(name)}`;
+}
+
+/** Pulls the human message out of a Convex error. */
+export function errorMessage(error: unknown, fallback = "Something went wrong") {
+  if (error && typeof error === "object" && "data" in error) {
+    const data = (error as { data: unknown }).data;
+    if (typeof data === "string") return data;
+  }
+  if (error instanceof Error) {
+    // Convex prefixes server errors with request metadata; keep the message.
+    const match = error.message.match(/(?:Uncaught )?(?:ConvexError|Error): (.+?)(?:\n|$)/);
+    return match?.[1] ?? fallback;
+  }
+  return fallback;
 }

@@ -1,10 +1,13 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 import { ConvexAuthNextjsServerProvider } from "@convex-dev/auth/nextjs/server";
-import { ConvexClientProvider } from "@/components/ConvexClientProvider";
 import { Analytics } from "@vercel/analytics/next";
+import { ConvexClientProvider } from "@/components/ConvexClientProvider";
+import { ThemeProvider } from "@/components/layout/ThemeProvider";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -17,8 +20,20 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Hangman Ranked",
-  description: "A hangman game with a leaderboard and ranked system.",
+  title: {
+    default: "Hangman Ranked",
+    template: "%s · Hangman Ranked",
+  },
+  description:
+    "Competitive Hangman: race other players head-to-head, climb the Elo ladder and chase solo high scores.",
+  applicationName: "Hangman Ranked",
+};
+
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f6f6fb" },
+    { media: "(prefers-color-scheme: dark)", color: "#16161d" },
+  ],
 };
 
 export default function RootLayout({
@@ -28,11 +43,16 @@ export default function RootLayout({
 }>) {
   return (
     <ConvexAuthNextjsServerProvider>
-      <html lang="en">
+      <html lang="en" suppressHydrationWarning>
         <body
-          className={`${geistSans.variable} ${geistMono.variable} antialiased mb-20 r md:mb-0`}
+          className={`${geistSans.variable} ${geistMono.variable} min-h-svh font-sans antialiased`}
         >
-          <ConvexClientProvider>{children}</ConvexClientProvider>
+          <ThemeProvider>
+            <ConvexClientProvider>
+              <TooltipProvider delayDuration={150}>{children}</TooltipProvider>
+            </ConvexClientProvider>
+            <Toaster position="top-center" richColors closeButton />
+          </ThemeProvider>
           <Analytics />
         </body>
       </html>

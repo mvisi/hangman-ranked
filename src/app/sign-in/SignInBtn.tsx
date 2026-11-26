@@ -9,6 +9,7 @@ const SignInBtn = ({ provider }: { provider: "GitHub" | "Google" }) => {
   return (
     <Button
       variant="outline"
+      size="lg"
       className="w-full"
       onClick={() => void signIn(provider.toLowerCase())}
     >
@@ -25,7 +26,7 @@ const SignInBtn = ({ provider }: { provider: "GitHub" | "Google" }) => {
           />
         )}
       </svg>
-      Login with {provider}
+      Continue with {provider}
     </Button>
   );
 };

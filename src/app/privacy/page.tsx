@@ -1,9 +1,20 @@
+import { ArrowLeftIcon } from "lucide-react";
+import type { Metadata } from "next";
 import Link from "next/link";
+
+export const metadata: Metadata = { title: "Privacy Policy" };
 
 const Page = () => {
   return (
-    <div className="w-full h-full bg-background dark py-32">
-      <main className="mx-auto prose prose-lg prose-invert lg:max-w-3/5 md:max-w-4/5 px-6">
+    <div className="w-full py-12 md:py-20">
+      <main className="prose prose-zinc dark:prose-invert mx-auto max-w-3xl px-6">
+        <Link
+          href="/"
+          className="text-muted-foreground hover:text-foreground not-prose mb-8 inline-flex items-center gap-1.5 text-sm"
+        >
+          <ArrowLeftIcon className="size-4" /> Back to the game
+        </Link>
+        <h1>Privacy Policy</h1>
         <h2>Introduction</h2>
         <p>
           This Privacy Policy describes how Hangman-Ranked (&quot;we&quot;,
@@ -279,7 +290,7 @@ const Page = () => {
           .
         </p>
 
-        <p className="text-sm text-gray-500">Last updated: 11/10/2025</p>
+        <p className="text-muted-foreground text-sm">Last updated: 11/10/2025</p>
       </main>
     </div>
   );

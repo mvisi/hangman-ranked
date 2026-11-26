@@ -25,6 +25,7 @@ export default defineSchema({
     ),
   })
     .index("by_user", ["userId"])
+    .index("by_user_completion", ["userId", "isCompleted"])
     .index("by_completion", ["isCompleted"])
     .index("by_isAbandoned", ["isAbandoned"])
     .index("score", ["score"])
@@ -33,17 +34,21 @@ export default defineSchema({
     userId: v.id("users"),
     userName: v.string(),
     userElo: v.number(),
+    // Clients ping while waiting; entries that stop pinging are ignored and purged.
+    lastHeartbeat: v.optional(v.number()),
   })
     .index("by_elo", ["userElo"])
     .index("by_user", ["userId"]),
   rankedMatches: defineTable({
     userId1: v.id("users"),
     userId2: v.id("users"),
-    // TODO: If user changes the name, the data will become stale
+    // Snapshots taken when the match starts. Read paths resolve the current
+    // name from the users table, so renames are reflected everywhere.
     userName1: v.string(),
     userName2: v.string(),
     userElo1: v.number(),
     userElo2: v.number(),
+    // Elo change from user 1's perspective (user 2 receives the negation).
     eloChange: v.optional(v.number()),
     word: v.string(),
     guessedLetters1: v.array(v.string()),
@@ -65,11 +70,21 @@ export default defineSchema({
     winner: v.optional(v.string()),
     winnerId: v.optional(v.id("users")),
     isAbandoned: v.boolean(),
+    endReason: v.optional(
+      v.union(
+        v.literal("solved"),
+        v.literal("failed"),
+        v.literal("timeout"),
+        v.literal("forfeit"),
+      ),
+    ),
     timeoutScheduleIdFor1: v.optional(v.id("_scheduled_functions")),
     timeoutScheduleIdFor2: v.optional(v.id("_scheduled_functions")),
   })
     .index("by_user1", ["userId1"])
     .index("by_user2", ["userId2"])
+    .index("by_user1_completion", ["userId1", "isCompleted"])
+    .index("by_user2_completion", ["userId2", "isCompleted"])
     .index("by_completion", ["isCompleted"])
     .index("by_total_time", ["totalTime"]),
   ...authTables,

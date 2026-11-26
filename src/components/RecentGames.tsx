@@ -1,264 +1,199 @@
 "use client";
 
-import { Preloaded, usePreloadedQuery } from "convex/react";
+import { useQuery } from "convex/react";
+import { FunctionReturnType } from "convex/server";
+import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+import Link from "next/link";
+import { useState } from "react";
 import { api } from "../../convex/_generated/api";
+import { DELETED_USER_NAME } from "../../convex/lib/username";
+import Container, { SectionTitle } from "./Container";
+import { ResultBadge } from "./stats/ResultBadge";
+import { Button } from "./ui/button";
+import { Skeleton } from "./ui/skeleton";
 import {
   Table,
   TableBody,
-  TableCaption,
   TableCell,
   TableHead,
   TableHeader,
   TableRow,
 } from "./ui/table";
-import Container from "./Container";
-import LineChartComponent from "./LineChart";
-import { cn, getEloProgression } from "@/lib/utils";
-import { fetchQuery } from "convex/nextjs";
-import { useState } from "react";
-import { Button } from "./ui/button";
-import { ArrowLeft, ArrowRight } from "lucide-react";
-import Link from "next/link";
+import { cn, formatDuration, formatRelative, formatSigned, profileHref } from "@/lib/utils";
 
-export type PreloadedRecentSoloGamesType = Preloaded<
-  typeof api.user.getRecentSoloGames
->;
-export type PreloadedRecentRankedGamesType = Preloaded<
-  typeof api.user.getRecentRankedGames
->;
+export type RankedGameRow = NonNullable<
+  FunctionReturnType<typeof api.user.getRecentRankedGames>
+>[number];
 
-export const RecentSoloGames = ({
-  preloadedRecentGames,
-}: {
-  preloadedRecentGames: PreloadedRecentSoloGamesType;
-}) => {
-  const recentGames = usePreloadedQuery(preloadedRecentGames);
+export function PlayerLink({ name, className }: { name: string; className?: string }) {
+  if (name === DELETED_USER_NAME) {
+    return <span className="text-muted-foreground italic">deleted user</span>;
+  }
+  return (
+    <Link
+      href={profileHref(name)}
+      className={cn("font-medium underline-offset-4 hover:underline", className)}
+    >
+      {name}
+    </Link>
+  );
+}
+
+export const RecentSoloGames = () => {
+  const games = useQuery(api.user.getRecentSoloGames);
+
+  if (games === undefined) {
+    return (
+      <Container>
+        <Skeleton className="h-48 w-full" />
+      </Container>
+    );
+  }
+  if (!games || games.length === 0) return null;
 
   return (
     <Container>
-      <div className="overflow-x-auto">
-        <Table className="min-w-full">
-          <TableCaption>Your recent Games</TableCaption>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-37.5 pl-6">Word</TableHead>
-              <TableHead className="text-right">Score</TableHead>
-              <TableHead className="hidden text-right sm:table-cell">
-                Mistakes
-              </TableHead>
-              <TableHead className="hidden text-right sm:table-cell">
-                Attempts
-              </TableHead>
-              <TableHead className="pr-6 text-right">Status</TableHead>
+      <SectionTitle title="Recent games" description="Your last few solo rounds." />
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Result</TableHead>
+            <TableHead>Word</TableHead>
+            <TableHead className="text-right">Score</TableHead>
+            <TableHead className="hidden text-right sm:table-cell">Guesses</TableHead>
+            <TableHead className="hidden text-right sm:table-cell">Misses</TableHead>
+            <TableHead className="text-right">Time</TableHead>
+            <TableHead className="hidden text-right md:table-cell">When</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {games.map((game) => (
+            <TableRow key={game._id}>
+              <TableCell>
+                <ResultBadge result={game.isWon ? "won" : game.isAbandoned ? "abandoned" : "lost"} />
+              </TableCell>
+              <TableCell className="font-mono font-medium uppercase">{game.word}</TableCell>
+              <TableCell className="tabular text-right font-semibold">{game.score ?? 0}</TableCell>
+              <TableCell className="tabular hidden text-right sm:table-cell">{game.attempts}</TableCell>
+              <TableCell className="tabular hidden text-right sm:table-cell">{game.mistakes}</TableCell>
+              <TableCell className="tabular text-right">{formatDuration(game.totalTime)}</TableCell>
+              <TableCell className="text-muted-foreground hidden text-right md:table-cell">
+                {formatRelative(game.endTime ?? game._creationTime)}
+              </TableCell>
             </TableRow>
-          </TableHeader>
-          <TableBody>
-            {recentGames.map((game) => {
-              return (
-                <TableRow
-                  key={game._id}
-                  className={`
-                    ${
-                      game.isWon
-                        ? "bg-green-100 hover:bg-green-200"
-                        : "bg-red-100 hover:bg-red-200"
-                    }
-                  `}
-                >
-                  <TableCell className="pl-6">{game.word}</TableCell>
-                  <TableCell className="text-right">{game.score}</TableCell>
-                  <TableCell className="hidden text-right sm:table-cell">
-                    {game.mistakes}
-                  </TableCell>
-                  <TableCell className="hidden text-right sm:table-cell">
-                    {game.attempts}
-                  </TableCell>
-                  <TableCell className="pr-6 text-right">
-                    {game.isAbandoned
-                      ? "Abandoned"
-                      : game.isWon
-                        ? "Won"
-                        : "Lost"}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
+          ))}
+        </TableBody>
+      </Table>
     </Container>
   );
 };
 
-export const RecentRankedGames = ({
-  preloadedRecentGames,
-}: {
-  preloadedRecentGames: PreloadedRecentRankedGamesType;
-}) => {
-  const recentGames = usePreloadedQuery(preloadedRecentGames);
-
-  const eloProgression = getEloProgression(recentGames);
-
-  return (
-    <>
-      <RecentRankedGamesTable recentGames={recentGames} />
-      {eloProgression.length > 3 && (
-        <RankedGamesGraph eloProgression={eloProgression} />
-      )}
-    </>
-  );
+/** The signed-in player's latest ranked matches (ranked page). */
+export const RecentRankedGames = () => {
+  const games = useQuery(api.user.getRecentRankedGames, { limit: 10 });
+  if (games === undefined) {
+    return (
+      <Container>
+        <Skeleton className="h-48 w-full" />
+      </Container>
+    );
+  }
+  if (!games || games.length === 0) return null;
+  return <RankedGamesTable games={games} title="Recent matches" />;
 };
 
-export const RecentRankedGamesTable = ({
-  recentGames,
-  tableTitle = "Your recent Games",
-  limit = 5,
-  paginate = false,
+export const RankedGamesTable = ({
+  games,
+  title,
+  description,
+  pageSize,
 }: {
-  recentGames: Awaited<
-    ReturnType<typeof fetchQuery<typeof api.user.getUserProfile>>
-  >["recentGames"];
-  tableTitle?: string;
-  limit?: number;
-  paginate?: boolean;
+  games: RankedGameRow[];
+  title: string;
+  description?: string;
+  /** Paginate client-side with this many rows per page. */
+  pageSize?: number;
 }) => {
   const [page, setPage] = useState(0);
-
-  // if paginate is true, use 5 per page, otherwise respect limit
-  const pageSize = limit;
-  const start = paginate ? page * pageSize : 0;
-  const end = start + pageSize;
-  const gamesToShow = recentGames.slice(start, end);
-
-  const totalPages = paginate ? Math.ceil(recentGames.length / pageSize) : 1;
+  const totalPages = pageSize ? Math.max(1, Math.ceil(games.length / pageSize)) : 1;
+  const rows = pageSize ? games.slice(page * pageSize, (page + 1) * pageSize) : games;
 
   return (
     <Container>
-      <div className="overflow-x-auto">
-        <Table className="min-w-full">
-          <TableCaption>{tableTitle}</TableCaption>
+      <SectionTitle title={title} description={description} />
+      {games.length === 0 ? (
+        <p className="text-muted-foreground py-8 text-center text-sm">No ranked matches yet.</p>
+      ) : (
+        <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-37.5 pl-6">Word</TableHead>
-              <TableHead className="text-right">Opponent</TableHead>
-              <TableHead className="text-right">Elo Change</TableHead>
-              <TableHead className="hidden text-right sm:table-cell">
-                Mistakes
-              </TableHead>
-              <TableHead className="hidden text-right sm:table-cell">
-                Attempts
-              </TableHead>
-              <TableHead className="pr-6 text-right">Winner</TableHead>
+              <TableHead>Result</TableHead>
+              <TableHead>Opponent</TableHead>
+              <TableHead className="hidden sm:table-cell">Word</TableHead>
+              <TableHead className="text-right">Elo</TableHead>
+              <TableHead className="hidden text-right sm:table-cell">Misses</TableHead>
+              <TableHead className="hidden text-right md:table-cell">When</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {gamesToShow.map((game) => {
-              return (
-                <TableRow
-                  key={game._id}
-                  className={`
-                    ${
-                      game.hasUserWon
-                        ? "bg-green-100 hover:bg-green-200"
-                        : "bg-red-100 hover:bg-red-200"
-                    }
-                  `}
+            {rows.map((game) => (
+              <TableRow key={game._id}>
+                <TableCell>
+                  <ResultBadge result={game.won ? "won" : "lost"} reason={game.endReason} />
+                </TableCell>
+                <TableCell className="max-w-40 truncate">
+                  <PlayerLink name={game.opponent} />
+                  <span className="text-muted-foreground tabular ml-1.5 hidden text-xs lg:inline">
+                    {game.opponentElo}
+                  </span>
+                </TableCell>
+                <TableCell className="hidden font-mono font-medium uppercase sm:table-cell">
+                  {game.word}
+                </TableCell>
+                <TableCell
+                  className={cn(
+                    "tabular text-right font-semibold",
+                    game.eloChange > 0 && "text-success",
+                    game.eloChange < 0 && "text-danger",
+                  )}
                 >
-                  <TableCell className="pl-6">{game.word}</TableCell>
-                  <TableCell>
-                    {game.opponent === "deleted-user" ? (
-                      <p>{game.opponent}</p>
-                    ) : (
-                      <Link
-                        href={`/profile/${encodeURIComponent(game.opponent)}`}
-                      >
-                        {game.opponent}
-                      </Link>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {game.eloChange
-                      ? game.eloChange > 0
-                        ? `+${game.eloChange}`
-                        : game.eloChange
-                      : 0}
-                  </TableCell>
-                  <TableCell className="hidden text-right sm:table-cell">
-                    {game.mistakes}
-                  </TableCell>
-                  <TableCell className="hidden text-right sm:table-cell">
-                    {game.attempts}
-                  </TableCell>
-                  <TableCell>
-                    {game.winner === "deleted-user" ? (
-                      <p>{game.winner}</p>
-                    ) : (
-                      <Link href={`/profile/${game.winner}`}>
-                        {game.winner}
-                      </Link>
-                    )}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
+                  {formatSigned(game.eloChange)}
+                </TableCell>
+                <TableCell className="tabular hidden text-right sm:table-cell">{game.mistakes}</TableCell>
+                <TableCell className="text-muted-foreground hidden text-right md:table-cell">
+                  {formatRelative(game.endTime)}
+                </TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
-      </div>
+      )}
 
-      {/* Pagination controls */}
-      {paginate && totalPages > 1 && (
-        <div className="mt-4 flex flex-wrap items-center justify-center gap-2 sm:gap-4">
+      {pageSize && totalPages > 1 && (
+        <div className="mt-4 flex items-center justify-center gap-3 text-sm">
           <Button
             variant="outline"
+            size="icon-sm"
             disabled={page === 0}
             onClick={() => setPage((p) => p - 1)}
+            aria-label="Previous page"
           >
-            <ArrowLeft />
+            <ChevronLeftIcon />
           </Button>
-          <span>
+          <span className="tabular text-muted-foreground">
             Page {page + 1} of {totalPages}
           </span>
           <Button
             variant="outline"
-            disabled={page === totalPages - 1}
+            size="icon-sm"
+            disabled={page >= totalPages - 1}
             onClick={() => setPage((p) => p + 1)}
+            aria-label="Next page"
           >
-            <ArrowRight />
+            <ChevronRightIcon />
           </Button>
         </div>
       )}
-    </Container>
-  );
-};
-
-export const RankedGamesGraph = ({
-  eloProgression,
-}: {
-  eloProgression: {
-    game: number;
-    elo: number;
-  }[];
-}) => {
-  return (
-    <Container>
-      <LineChartComponent
-        chartConfig={{
-          elo: {
-            label: "Elo",
-            color: "var(--chart-3)",
-          },
-        }}
-        chartData={eloProgression}
-        lineType="linear"
-        yDomain={["dataMin", "dataMax"]}
-        yPadding={{ bottom: 20, top: 20 }}
-        dot={{
-          fill: "var(--chart-3)",
-        }}
-        activeDot={{
-          r: 6,
-        }}
-      />
     </Container>
   );
 };

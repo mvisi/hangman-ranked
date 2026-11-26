@@ -1,17 +1,20 @@
-const Loading = () => {
-  return (
-    <div className="flex-center w-full h-full">
-      <div className="bg-white rounded-md drop-shadow-lg w-[95%] lg:w-[55%] md:w-[75%] sm:w-[85%] mt-6 mb-6">
-        <div className="p-6 bg-indigo-600 rounded-t-md text-white">
-          <h2 className="text-3xl font-bold">🏆 Leaderboard</h2>
-          <p className="mt-2">Top 100 Games and Players Worldwide</p>
-        </div>
-        <div className="p-6">
-          <p className="text-center text-gray-500">Loading</p>
-        </div>
-      </div>
+import { Page } from "@/components/Container";
+import { Skeleton } from "@/components/ui/skeleton";
+
+const Loading = () => (
+  <Page>
+    <div className="space-y-2 pt-8 md:pt-12">
+      <Skeleton className="h-4 w-28" />
+      <Skeleton className="h-10 w-64" />
+      <Skeleton className="h-5 w-80 max-w-full" />
     </div>
-  );
-};
+    <Skeleton className="mt-6 h-10 w-80 max-w-full rounded-xl" />
+    <div className="bg-card mt-4 space-y-3 rounded-2xl border p-5">
+      {Array.from({ length: 10 }, (_, i) => (
+        <Skeleton key={i} className="h-9 w-full" />
+      ))}
+    </div>
+  </Page>
+);
 
 export default Loading;

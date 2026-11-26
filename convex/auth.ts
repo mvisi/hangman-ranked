@@ -1,19 +1,19 @@
 import GitHub from "@auth/core/providers/github";
 import Google from "@auth/core/providers/google";
 import { convexAuth, getAuthUserId } from "@convex-dev/auth/server";
-import { MutationCtx, query, QueryCtx } from "./_generated/server";
-
-import { randomSuffix } from "./lib/utils";
 import { ConvexError } from "convex/values";
+import { MutationCtx, query, QueryCtx } from "./_generated/server";
 import CustomEmail from "./lib/CustomEmail";
-import { notAllowedUsernames } from "./data/notAllowedUsernames";
+import { DEFAULT_ELO } from "./lib/elo";
+import { avatarUrlFor, checkUsername, isBlockedUsername } from "./lib/username";
+import { randomSuffix } from "./lib/utils";
 
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [GitHub, Google, CustomEmail],
   callbacks: {
     /**
-     * Fully replace Convex Auth’s default upsert logic.
-     * Must return either an existing user ID or the newly inserted one.
+     * Fully replace Convex Auth's default upsert logic so every user gets a
+     * unique, validated username and initialised stats.
      */
     async createOrUpdateUser(ctx: MutationCtx, args) {
       if (args.existingUserId) {
@@ -23,74 +23,32 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
       const email = args.profile.email;
       const phone = args.profile.phone;
 
-      // const emailVerificationTime =
-      //   args.profile.emailVerified === true ? Date.now() : undefined;
-      // const phoneVerificationTime =
-      //   args.profile.phoneVerified === true ? Date.now() : undefined;
-
-      // Validate name for password provider
+      let name: string;
       if (args.provider.id === "password" && args.profile.name) {
-        const name = (args.profile.name as string).trim();
-        const lowercaseName = name.toLowerCase();
-
-        if (
-          notAllowedUsernames.has(lowercaseName) ||
-          lowercaseName.includes("deleted_user")
-        ) {
-          throw new ConvexError("This username is not allowed");
+        // Password sign-ups pick their own username: validate it strictly.
+        const result = checkUsername(args.profile.name as string);
+        if (!result.ok) {
+          throw new ConvexError(result.error);
         }
-        if (!/^[A-Za-z][A-Za-z0-9_]+$/.test(name)) {
-          throw new ConvexError("Invalid characters");
-        }
-
-        const sameNameUser = await ctx.db
-          .query("users")
-          .withIndex("lowercase_name", (q) =>
-            q.eq("lowercaseName", lowercaseName)
-          )
-          .unique();
-        if (sameNameUser) {
+        if (await isUsernameTaken(ctx, result.name)) {
           throw new ConvexError("This username is taken");
         }
-
-        const image = `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`;
-
-        const userId = await ctx.db.insert("users", {
-          email,
-          phone,
-          name,
-          lowercaseName,
-          image,
-          elo: 1200,
-          userStats: {
-            gamesPlayed: 0,
-            wins: 0,
-            winRate: 0,
-            lastSeen: Date.now(),
-          },
-          status: "active",
-        });
-
-        return userId;
+        name = result.name;
+      } else {
+        // OAuth sign-ups get a name derived from their profile.
+        name = await generateUniqueName(
+          ctx,
+          (args.profile.name as string | undefined) ?? email?.split("@")[0],
+        );
       }
-      const name =
-        (args.profile.name as string | undefined) ??
-        email?.split("@")[0] ??
-        undefined;
 
-      const finalName = await generateUniqueName(ctx, name);
-      if (finalName.includes("deleted-user")) {
-        throw new ConvexError("This username is not allowed");
-      }
-      const image = `https://ui-avatars.com/api/?name=${encodeURIComponent(finalName)}&background=random`;
-
-      const userId = await ctx.db.insert("users", {
+      return await ctx.db.insert("users", {
         email,
         phone,
-        name: finalName,
-        lowercaseName: finalName.toLowerCase(),
-        image,
-        elo: 1000,
+        name,
+        lowercaseName: name.toLowerCase(),
+        image: avatarUrlFor(name),
+        elo: DEFAULT_ELO,
         userStats: {
           gamesPlayed: 0,
           wins: 0,
@@ -99,62 +57,45 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         },
         status: "active",
       });
-
-      return userId;
     },
   },
 });
 
+export async function isUsernameTaken(ctx: QueryCtx, name: string) {
+  const existing = await ctx.db
+    .query("users")
+    .withIndex("lowercase_name", (q) => q.eq("lowercaseName", name.toLowerCase()))
+    .first();
+  return existing !== null;
+}
+
 export async function generateUniqueName(
   ctx: QueryCtx,
-  baseName: string | undefined
+  baseName: string | undefined,
 ): Promise<string> {
-  let normalized = (baseName ?? "user")
+  let normalized = (baseName ?? "player")
     .trim()
-    .replace(/-/g, "_")
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_]/g, "");
+    .replace(/[-\s]+/g, "_")
+    .replace(/[^a-zA-Z0-9_]/g, "")
+    .split("_")[0]
+    .replace(/^[^a-zA-Z]+/, "")
+    .slice(0, 10);
 
-  normalized = normalized.split("_")[0];
-  // Ensure it’s not empty after normalization
-  if (!normalized) {
-    normalized = "user";
-  }
-  if (normalized.length > 10) {
-    normalized = normalized.slice(0, 10);
+  if (normalized.length < 3 || isBlockedUsername(normalized.toLowerCase())) {
+    normalized = "player";
   }
 
-  // Try base name + random suffix until available
+  // Try the base name, then base name + random suffix until available.
   let finalName = normalized;
-  let attempts = 0;
-  const maxAttempts = 10;
-  while (
-    await ctx.db
-      .query("users")
-      .withIndex("lowercase_name", (q) =>
-        q.eq("lowercaseName", finalName.toLowerCase())
-      )
-      .unique()
-  ) {
-    if (attempts >= maxAttempts) {
-      // Fall back to timestamp-based unique name
-      finalName = `${normalized}_${Date.now()}`;
+  for (let attempt = 0; await isUsernameTaken(ctx, finalName); attempt++) {
+    if (attempt >= 10) {
+      finalName = `${normalized}_${Date.now().toString(36)}`;
       break;
     }
-    const suffix = randomSuffix();
-    const candidate = `${normalized}_${suffix}`;
-    // Ensure the final name doesn't exceed field limits (I know it wont but still)
-    finalName = candidate.length > 20 ? candidate.slice(0, 20) : candidate;
-    attempts++;
+    finalName = `${normalized}_${randomSuffix()}`.slice(0, 20);
   }
   return finalName;
 }
-
-export const loggedInUser = query({
-  handler: async (ctx) => {
-    return getLoggedInUserHelper(ctx);
-  },
-});
 
 export const getLoggedInUserHelper = async (ctx: QueryCtx) => {
   const userId = await getAuthUserId(ctx);
@@ -162,8 +103,24 @@ export const getLoggedInUserHelper = async (ctx: QueryCtx) => {
     return null;
   }
   const user = await ctx.db.get(userId);
-  if (!user) {
+  if (!user || user.status === "deleted") {
     return null;
   }
   return user;
 };
+
+/** Like {@link getLoggedInUserHelper} but throws when signed out. */
+export const requireUser = async (ctx: QueryCtx) => {
+  const user = await getLoggedInUserHelper(ctx);
+  if (!user) {
+    throw new ConvexError("You need to be signed in to do that");
+  }
+  return user;
+};
+
+export const loggedInUser = query({
+  args: {},
+  handler: async (ctx) => {
+    return getLoggedInUserHelper(ctx);
+  },
+});
