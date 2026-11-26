@@ -1,5 +1,7 @@
 export const DEFAULT_ELO = 1000;
 export const ELO_K_FACTOR = 32;
+/** Matches a player must finish before appearing on the Elo leaderboard. */
+export const PLACEMENT_MATCHES = 5;
 
 /** Probability that a player rated `ratingA` beats one rated `ratingB`. */
 export function expectedScore(ratingA: number, ratingB: number) {

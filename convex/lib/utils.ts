@@ -1,4 +1,6 @@
 import { Doc } from "../_generated/dataModel";
+import { PLACEMENT_MATCHES } from "./elo";
+import { DELETED_USER_NAME } from "./username";
 
 export function sum(values: readonly (number | undefined)[]) {
   return values.reduce<number>(
@@ -12,14 +14,6 @@ export function average(values: readonly (number | undefined)[]) {
   return numbers.length ? sum(numbers) / numbers.length : 0;
 }
 
-export function countLetters(str: string) {
-  const letterCount: Record<string, number> = {};
-  for (const letter of str) {
-    letterCount[letter] = (letterCount[letter] || 0) + 1;
-  }
-  return letterCount;
-}
-
 const BASE62_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -31,16 +25,21 @@ export function randomSuffix(length = 6): string {
   return result;
 }
 
-export function getUpdatedStats(user: Doc<"users">, isWon: boolean) {
-  const gamesPlayed = (user.userStats?.gamesPlayed ?? 0) + 1;
-  const wins = (user.userStats?.wins ?? 0) + (isWon ? 1 : 0);
+type StreakStats = { games: number; wins: number; streak: number; bestStreak: number };
+
+/** Running totals after one more game. */
+export function bumpStats<S extends StreakStats>(stats: S, won: boolean): S {
+  const streak = won ? stats.streak + 1 : 0;
   return {
-    gamesPlayed,
-    wins,
-    winRate: Number.parseFloat((wins / gamesPlayed).toFixed(3)),
-    lastSeen: Date.now(),
+    ...stats,
+    games: stats.games + 1,
+    wins: stats.wins + (won ? 1 : 0),
+    streak,
+    bestStreak: Math.max(stats.bestStreak, streak),
   };
 }
+
+export const emptyStats = () => ({ games: 0, wins: 0, streak: 0, bestStreak: 0 });
 
 /** Key for grouping timestamps by calendar day in the viewer's timezone. */
 export function dayKey(timestamp: number, tzOffsetMinutes = 0) {
@@ -61,11 +60,13 @@ export function streaks(results: readonly boolean[]) {
   return { best, current: run };
 }
 
-/** Players must have finished a ranked game to appear in the rankings. */
-export function isRankedPlayer(user: Doc<"users">) {
-  return (
-    (user.userStats?.gamesPlayed ?? 0) > 0 &&
-    user.status !== "deleted" &&
-    user.status !== "banned"
-  );
+/** Public name of a user, hiding deleted accounts. */
+export function displayName(user: Doc<"users"> | null | undefined) {
+  if (!user || user.deletedAt) return DELETED_USER_NAME;
+  return user.name ?? "Unknown";
+}
+
+/** Players appear on the Elo leaderboard once placement is complete. */
+export function isOnLeaderboard(user: Doc<"users">) {
+  return !user.deletedAt && user.ranked.games >= PLACEMENT_MATCHES;
 }

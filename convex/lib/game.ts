@@ -33,6 +33,23 @@ export type GuessOutcome = GuessState & {
 
 export class InvalidGuessError extends Error {}
 
+/**
+ * Rebuilds the full guess state from the stored word and ordered guesses.
+ * Only the guess list is persisted; everything else is derived.
+ */
+export function deriveState(word: string, guesses: readonly string[]): GuessState {
+  const correctGuesses = guesses.filter((g) => word.includes(g));
+  const wrongGuesses = guesses.filter((g) => !word.includes(g));
+  return {
+    word,
+    guessedLetters: [...guesses],
+    correctGuesses,
+    wrongGuesses,
+    attempts: guesses.length,
+    mistakes: wrongGuesses.length,
+  };
+}
+
 /** Lowercases a guess and returns it if it's a single a-z letter. */
 export function normalizeGuess(raw: string): string | null {
   const letter = raw.trim().toLowerCase();

@@ -1,162 +1,94 @@
 import { ConvexError, v } from "convex/values";
-import { Doc, Id } from "./_generated/dataModel";
+import { Doc } from "./_generated/dataModel";
 import { mutation, query, QueryCtx } from "./_generated/server";
 import { getLoggedInUserHelper, isUsernameTaken, requireUser } from "./auth";
-import { getRankTier } from "./lib/elo";
-import { accuracy, ALPHABET } from "./lib/game";
-import {
-  avatarUrlFor,
-  checkUsername,
-  DELETED_USER_NAME,
-} from "./lib/username";
-import { average, dayKey, isRankedPlayer, streaks, sum } from "./lib/utils";
-import { displayName, finishMatch, getActiveMatchFor } from "./ranked";
+import { endActiveGame, summarizeGame } from "./game";
+import { leaderboardPosition } from "./leaderboard";
+import { getRankTier, PLACEMENT_MATCHES } from "./lib/elo";
+import { accuracy, ALPHABET, deriveState } from "./lib/game";
+import { avatarUrlFor, checkUsername, DELETED_USER_NAME } from "./lib/username";
+import { average, dayKey, displayName, sum } from "./lib/utils";
+import { forfeitActiveMatch, leaveQueue } from "./ranked";
 
 /* -------------------------------------------------------------------------- */
 /*                                   Helpers                                  */
 /* -------------------------------------------------------------------------- */
 
-async function getCompletedSoloGames(ctx: QueryCtx, userId: Id<"users">) {
-  return await ctx.db
-    .query("games")
-    .withIndex("by_user_completion", (q) =>
-      q.eq("userId", userId).eq("isCompleted", true),
-    )
+async function getFinishedSoloGames(ctx: QueryCtx, user: Doc<"users">) {
+  const games = await ctx.db
+    .query("soloGames")
+    .withIndex("by_user", (q) => q.eq("userId", user._id))
     .collect();
+  return games.filter((g) => g.status !== "active");
 }
 
 /**
- * Every completed ranked match of a user, oldest first, seen from that
- * user's side. Elo after each match is reconstructed backwards from the
- * current rating, which is exact because ratings only change through matches.
+ * A user's finished ranked matches, oldest first, from their point of view.
  */
 export async function getRankedHistory(ctx: QueryCtx, user: Doc<"users">) {
-  const [asUser1, asUser2] = await Promise.all([
-    ctx.db
-      .query("rankedMatches")
-      .withIndex("by_user1_completion", (q) =>
-        q.eq("userId1", user._id).eq("isCompleted", true),
-      )
-      .collect(),
-    ctx.db
-      .query("rankedMatches")
-      .withIndex("by_user2_completion", (q) =>
-        q.eq("userId2", user._id).eq("isCompleted", true),
-      )
-      .collect(),
+  const players = await ctx.db
+    .query("matchPlayers")
+    .withIndex("by_user_active_ended", (q) => q.eq("userId", user._id).eq("active", false))
+    .collect();
+
+  const [matches, opponents] = await Promise.all([
+    Promise.all(players.map((p) => ctx.db.get(p.matchId))),
+    Promise.all([...new Set(players.map((p) => p.opponentId))].map((id) => ctx.db.get(id))),
   ]);
-
-  const matches = [...asUser1, ...asUser2].sort(
-    (a, b) => (a.endTime ?? a._creationTime) - (b.endTime ?? b._creationTime),
+  const opponentById = new Map(
+    opponents.filter((u): u is Doc<"users"> => u !== null).map((u) => [u._id, u] as const),
   );
 
-  // Resolve current opponent names so renames show everywhere.
-  const opponentIds = [
-    ...new Set(
-      matches.map((m) => (m.userId1 === user._id ? m.userId2 : m.userId1)),
-    ),
-  ];
-  const opponents = new Map(
-    (await Promise.all(opponentIds.map((id) => ctx.db.get(id))))
-      .filter((u): u is Doc<"users"> => u !== null)
-      .map((u) => [u._id, u] as const),
-  );
-
-  const rows = matches.map((match) => {
-    const isUser1 = match.userId1 === user._id;
-    const opponentId = isUser1 ? match.userId2 : match.userId1;
-    const opponent = opponents.get(opponentId) ?? null;
-    const won = match.winnerId === user._id;
-    const eloChange = isUser1 ? (match.eloChange ?? 0) : -(match.eloChange ?? 0);
+  return players.map((p, i) => {
+    const match = matches[i];
+    const eloAfter = p.eloAfter ?? p.eloBefore;
+    const opponent = displayName(opponentById.get(p.opponentId));
+    const won = p.result === "won";
     return {
-      _id: match._id,
-      endTime: match.endTime ?? match._creationTime,
-      word: match.word,
+      _id: p.matchId,
+      endTime: p.endedAt ?? p._creationTime,
+      word: match?.word ?? "",
       won,
-      eloChange,
-      eloAfter: 0, // filled in below
-      opponent: displayName(opponent, isUser1 ? match.userName2 : match.userName1),
-      opponentElo: isUser1 ? match.userElo2 : match.userElo1,
-      winner: won
-        ? displayName(user, isUser1 ? match.userName1 : match.userName2)
-        : displayName(opponent, match.winner ?? "Unknown"),
-      attempts: isUser1 ? match.attempts1 : match.attempts2,
-      mistakes: isUser1 ? match.mistakes1 : match.mistakes2,
-      endReason: match.endReason,
+      eloBefore: p.eloBefore,
+      eloChange: eloAfter - p.eloBefore,
+      eloAfter,
+      opponent,
+      opponentElo: p.opponentEloBefore,
+      winner: won ? displayName(user) : opponent,
+      attempts: p.guesses.length,
+      mistakes: p.mistakes,
+      endReason: match?.endReason,
     };
   });
-
-  let elo = user.elo;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    rows[i].eloAfter = elo;
-    elo -= rows[i].eloChange;
-  }
-
-  return { rows, startingElo: elo };
 }
 
-async function getLeaderboardPosition(ctx: QueryCtx, user: Doc<"users">) {
-  if (!isRankedPlayer(user)) return null;
+type HistoryRow = Awaited<ReturnType<typeof getRankedHistory>>[number];
 
-  const [higherElo, sameEloMoreGames, sameEloSameGamesOlder] = await Promise.all([
-    ctx.db
-      .query("users")
-      .withIndex("by_elo", (q) => q.gt("elo", user.elo))
-      .filter((q) =>
-        q.and(
-          q.gt(q.field("userStats.gamesPlayed"), 0),
-          q.neq(q.field("status"), "deleted"),
-          q.neq(q.field("status"), "banned"),
-        ),
-      )
-      .collect(),
-    ctx.db
-      .query("users")
-      .withIndex("by_elo_games_played", (q) =>
-        q.eq("elo", user.elo).gt("userStats.gamesPlayed", user.userStats.gamesPlayed),
-      )
-      .filter((q) =>
-        q.and(q.neq(q.field("status"), "deleted"), q.neq(q.field("status"), "banned")),
-      )
-      .collect(),
-    ctx.db
-      .query("users")
-      .withIndex("by_elo_games_played", (q) =>
-        q
-          .eq("elo", user.elo)
-          .eq("userStats.gamesPlayed", user.userStats.gamesPlayed)
-          .lt("_creationTime", user._creationTime),
-      )
-      .filter((q) =>
-        q.and(q.neq(q.field("status"), "deleted"), q.neq(q.field("status"), "banned")),
-      )
-      .collect(),
-  ]);
-
-  return (
-    higherElo.length + sameEloMoreGames.length + sameEloSameGamesOlder.length + 1
-  );
+function eloHistory(user: Doc<"users">, rows: HistoryRow[]) {
+  return [
+    { game: 0, elo: rows[0]?.eloBefore ?? user.elo, eloChange: 0, date: user._creationTime },
+    ...rows.map((r, i) => ({ game: i + 1, elo: r.eloAfter, eloChange: r.eloChange, date: r.endTime })),
+  ];
 }
+
+const winRate = (s: { games: number; wins: number }) => (s.games ? s.wins / s.games : 0);
 
 /* -------------------------------------------------------------------------- */
 /*                                Home & solo                                 */
 /* -------------------------------------------------------------------------- */
 
-/** Headline numbers for the home page. */
+/** Headline numbers for the home page, straight from the running totals. */
 export const getUserStats = query({
   args: {},
   handler: async (ctx) => {
     const user = await getLoggedInUserHelper(ctx);
     if (!user) return null;
-    const games = await getCompletedSoloGames(ctx, user._id);
-    const totalWins = games.filter((g) => g.isWon).length;
     return {
-      totalGames: games.length,
-      totalWins,
-      winRate: games.length ? totalWins / games.length : 0,
-      totalScore: sum(games.map((g) => g.score)),
-      bestScore: user.personalScoreRecord ?? 0,
-      currentStreak: streaks(games.map((g) => g.isWon)).current,
+      totalGames: user.solo.games,
+      totalWins: user.solo.wins,
+      winRate: winRate(user.solo),
+      bestScore: user.solo.bestScore,
+      currentStreak: user.solo.streak,
     };
   },
 });
@@ -166,13 +98,12 @@ export const getRecentSoloGames = query({
   handler: async (ctx) => {
     const user = await getLoggedInUserHelper(ctx);
     if (!user) return null;
-    return await ctx.db
-      .query("games")
-      .withIndex("by_user_completion", (q) =>
-        q.eq("userId", user._id).eq("isCompleted", true),
-      )
+    const recent = await ctx.db
+      .query("soloGames")
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
       .order("desc")
-      .take(8);
+      .take(9);
+    return recent.filter((g) => g.status !== "active").slice(0, 8).map(summarizeGame);
   },
 });
 
@@ -183,43 +114,36 @@ export const getSoloStats = query({
     const user = await getLoggedInUserHelper(ctx);
     if (!user) return null;
 
-    const games = await getCompletedSoloGames(ctx, user._id);
-    const won = games.filter((g) => g.isWon);
-    const streak = streaks(games.map((g) => g.isWon));
+    const games = (await getFinishedSoloGames(ctx, user)).map((g) => ({
+      ...summarizeGame(g),
+      ...deriveState(g.word, g.guesses),
+      won: g.status === "won",
+    }));
+    const won = games.filter((g) => g.won);
 
-    const summarize = (list: Doc<"games">[]) => ({
-      score: Math.round(average(list.map((g) => g.score ?? 0))),
+    const summarize = (list: typeof games) => ({
+      score: Math.round(average(list.map((g) => g.score))),
       wordLength: Number(average(list.map((g) => g.word.length)).toFixed(1)),
       attempts: Number(average(list.map((g) => g.attempts)).toFixed(1)),
       mistakes: Number(average(list.map((g) => g.mistakes)).toFixed(1)),
-      timeMs: Math.round(average(list.map((g) => g.totalTime))),
-      accuracy: Math.round(
-        average(list.map((g) => accuracy(g.correctGuesses.length, g.attempts))),
-      ),
+      timeMs: Math.round(average(list.map((g) => g.durationMs))),
+      accuracy: Math.round(average(list.map((g) => accuracy(g.correct, g.attempts)))),
     });
 
-    const winsByDay = new Map<string, number>();
     const activity = new Map<string, { count: number; wins: number }>();
     for (const g of games) {
-      const key = dayKey(g.endTime ?? g._creationTime, tzOffsetMinutes);
+      const key = dayKey(g.endedAt, tzOffsetMinutes);
       const day = activity.get(key) ?? { count: 0, wins: 0 };
       day.count++;
-      if (g.isWon) {
-        day.wins++;
-        winsByDay.set(key, (winsByDay.get(key) ?? 0) + 1);
-      }
+      if (g.won) day.wins++;
       activity.set(key, day);
     }
 
-    const letters = ALPHABET.map((letter) => {
-      let hits = 0;
-      let misses = 0;
-      for (const g of games) {
-        if (g.correctGuesses.includes(letter)) hits++;
-        else if (g.wrongGuesses.includes(letter)) misses++;
-      }
-      return { letter: letter.toUpperCase(), hits, misses };
-    });
+    const letters = ALPHABET.map((letter) => ({
+      letter: letter.toUpperCase(),
+      hits: games.filter((g) => g.correctGuesses.includes(letter)).length,
+      misses: games.filter((g) => g.wrongGuesses.includes(letter)).length,
+    }));
 
     const openerMap = new Map<string, { games: number; wins: number }>();
     for (const g of games) {
@@ -227,69 +151,60 @@ export const getSoloStats = query({
       if (!first) continue;
       const entry = openerMap.get(first) ?? { games: 0, wins: 0 };
       entry.games++;
-      if (g.isWon) entry.wins++;
+      if (g.won) entry.wins++;
       openerMap.set(first, entry);
     }
     const openers = [...openerMap.entries()]
       .map(([letter, e]) => ({
         letter: letter.toUpperCase(),
-        games: e.games,
-        wins: e.wins,
+        ...e,
         winRate: Math.round((e.wins / e.games) * 100),
       }))
       .sort((a, b) => b.games - a.games || b.winRate - a.winRate)
       .slice(0, 6);
 
-    const mistakeDistribution = Array.from({ length: 6 }, (_, mistakes) => ({
-      mistakes,
-      games: won.filter((g) => g.mistakes === mistakes).length,
-    }));
-
     const HISTORY_SIZE = 50;
     const offset = Math.max(0, games.length - HISTORY_SIZE);
-    const history = games.slice(offset).map((g, i) => ({
-      game: offset + i + 1,
-      score: g.score ?? 0,
-      attempts: g.attempts,
-      correct: g.correctGuesses.length,
-      wrong: g.wrongGuesses.length,
-      accuracy: accuracy(g.correctGuesses.length, g.attempts),
-      won: g.isWon,
-      word: g.word,
-      timeMs: g.totalTime ?? 0,
-      date: g.endTime ?? g._creationTime,
-    }));
 
     return {
       summary: {
-        totalGames: games.length,
-        totalWins: won.length,
-        winRate: games.length ? won.length / games.length : 0,
-        timePlayedMs: sum(games.map((g) => g.totalTime)),
-        currentStreak: streak.current,
-        bestStreak: streak.best,
-        abandoned: games.filter((g) => g.isAbandoned).length,
+        totalGames: user.solo.games,
+        totalWins: user.solo.wins,
+        winRate: winRate(user.solo),
+        timePlayedMs: sum(games.map((g) => g.durationMs)),
+        currentStreak: user.solo.streak,
+        bestStreak: user.solo.bestStreak,
+        abandoned: games.filter((g) => g.result === "abandoned").length,
       },
       records: {
-        bestScore: Math.max(0, ...won.map((g) => g.score ?? 0)),
-        fastestWinMs: won.length
-          ? Math.min(...won.map((g) => g.totalTime ?? Infinity))
-          : null,
-        longestWord: won.reduce(
-          (longest, g) => (g.word.length > longest.length ? g.word : longest),
-          "",
-        ),
+        bestScore: user.solo.bestScore,
+        fastestWinMs: won.length ? Math.min(...won.map((g) => g.durationMs)) : null,
+        longestWord: won.reduce((longest, g) => (g.word.length > longest.length ? g.word : longest), ""),
         fewestMistakes: won.length ? Math.min(...won.map((g) => g.mistakes)) : null,
         flawlessWins: won.filter((g) => g.mistakes === 0).length,
-        mostWinsInADay: Math.max(0, ...winsByDay.values()),
+        mostWinsInADay: Math.max(0, ...[...activity.values()].map((d) => d.wins)),
       },
       averages: { won: summarize(won), all: summarize(games) },
       charts: {
-        history,
+        history: games.slice(offset).map((g, i) => ({
+          game: offset + i + 1,
+          score: g.score,
+          attempts: g.attempts,
+          correct: g.correct,
+          wrong: g.mistakes,
+          accuracy: accuracy(g.correct, g.attempts),
+          won: g.won,
+          word: g.word,
+          timeMs: g.durationMs,
+          date: g.endedAt,
+        })),
         activity: [...activity.entries()].map(([date, d]) => ({ date, ...d })),
         letters,
         openers,
-        mistakeDistribution,
+        mistakeDistribution: Array.from({ length: 6 }, (_, mistakes) => ({
+          mistakes,
+          games: won.filter((g) => g.mistakes === mistakes).length,
+        })),
       },
     };
   },
@@ -304,8 +219,7 @@ export const getRecentRankedGames = query({
   handler: async (ctx, { userId, limit = 10 }) => {
     const user = userId ? await ctx.db.get(userId) : await getLoggedInUserHelper(ctx);
     if (!user) return null;
-    const { rows } = await getRankedHistory(ctx, user);
-    return rows.slice(-limit).reverse();
+    return (await getRankedHistory(ctx, user)).slice(-limit).reverse();
   },
 });
 
@@ -316,10 +230,9 @@ export const getRankedStats = query({
     const user = await getLoggedInUserHelper(ctx);
     if (!user) return null;
 
-    const { rows, startingElo } = await getRankedHistory(ctx, user);
-    const wins = rows.filter((r) => r.won);
-    const streak = streaks(rows.map((r) => r.won));
-    const elos = [startingElo, ...rows.map((r) => r.eloAfter)];
+    const rows = await getRankedHistory(ctx, user);
+    const count = (pred: (r: HistoryRow) => boolean) => rows.filter(pred).length;
+    const quit = (r: HistoryRow) => r.endReason === "timeout" || r.endReason === "forfeit";
 
     const byOpponent = new Map<string, { games: number; wins: number }>();
     for (const r of rows) {
@@ -329,45 +242,31 @@ export const getRankedStats = query({
       byOpponent.set(r.opponent, e);
     }
 
-    const count = (pred: (r: (typeof rows)[number]) => boolean) =>
-      rows.filter(pred).length;
-
     return {
       summary: {
         elo: user.elo,
         tier: getRankTier(user.elo),
-        position: await getLeaderboardPosition(ctx, user),
-        peakElo: Math.max(...elos),
-        games: rows.length,
-        wins: wins.length,
-        losses: rows.length - wins.length,
-        winRate: rows.length ? wins.length / rows.length : 0,
-        currentStreak: streak.current,
-        bestStreak: streak.best,
+        position: await leaderboardPosition(ctx, user),
+        placement: { played: user.ranked.games, required: PLACEMENT_MATCHES },
+        peakElo: user.peakElo,
+        games: user.ranked.games,
+        wins: user.ranked.wins,
+        losses: user.ranked.games - user.ranked.wins,
+        winRate: winRate(user.ranked),
+        currentStreak: user.ranked.streak,
+        bestStreak: user.ranked.bestStreak,
         avgMistakes: Number(average(rows.map((r) => r.mistakes)).toFixed(1)),
         avgAttempts: Number(average(rows.map((r) => r.attempts)).toFixed(1)),
       },
       outcomes: {
         solved: count((r) => r.won && r.endReason === "solved"),
         opponentFailed: count((r) => r.won && r.endReason === "failed"),
-        opponentTimedOut: count(
-          (r) => r.won && (r.endReason === "timeout" || r.endReason === "forfeit"),
-        ),
+        opponentTimedOut: count((r) => r.won && quit(r)),
         outsolved: count((r) => !r.won && r.endReason === "solved"),
         failed: count((r) => !r.won && r.endReason === "failed"),
-        timedOut: count(
-          (r) => !r.won && (r.endReason === "timeout" || r.endReason === "forfeit"),
-        ),
+        timedOut: count((r) => !r.won && quit(r)),
       },
-      eloHistory: [
-        { game: 0, elo: startingElo, eloChange: 0, date: user._creationTime },
-        ...rows.map((r, i) => ({
-          game: i + 1,
-          elo: r.eloAfter,
-          eloChange: r.eloChange,
-          date: r.endTime,
-        })),
-      ],
+      eloHistory: eloHistory(user, rows),
       form: rows.slice(-10).map((r) => ({ _id: r._id, won: r.won, opponent: r.opponent })),
       rivals: [...byOpponent.entries()]
         .filter(([name]) => name !== DELETED_USER_NAME)
@@ -386,51 +285,34 @@ export const getUserProfile = query({
   args: { userName: v.string() },
   handler: async (ctx, { userName }) => {
     const lowercaseName = userName.trim().toLowerCase();
-    if (!lowercaseName || lowercaseName === DELETED_USER_NAME) return null;
+    if (!lowercaseName) return null;
 
     const user = await ctx.db
       .query("users")
-      .withIndex("lowercase_name", (q) => q.eq("lowercaseName", lowercaseName))
+      .withIndex("by_lowercase_name", (q) => q.eq("lowercaseName", lowercaseName))
       .first();
-    if (!user || user.status === "deleted" || user.status === "banned") {
-      return null;
-    }
+    if (!user || user.deletedAt) return null;
 
     const requestingUser = await getLoggedInUserHelper(ctx);
-    const [{ rows, startingElo }, soloGames, position] = await Promise.all([
+    const [rows, position] = await Promise.all([
       getRankedHistory(ctx, user),
-      getCompletedSoloGames(ctx, user._id),
-      getLeaderboardPosition(ctx, user),
+      leaderboardPosition(ctx, user),
     ]);
-    const soloWins = soloGames.filter((g) => g.isWon).length;
 
     return {
       _id: user._id,
-      name: user.name ?? "Unknown",
+      name: displayName(user),
       image: user.image,
       accountCreated: user._creationTime,
-      lastSeen: user.userStats.lastSeen,
+      lastSeen: user.lastSeenAt,
       elo: user.elo,
       tier: getRankTier(user.elo),
       rank: position,
-      peakElo: Math.max(startingElo, ...rows.map((r) => r.eloAfter)),
-      personalScoreRecord: user.personalScoreRecord ?? 0,
-      userStats: user.userStats,
-      currentStreak: streaks(rows.map((r) => r.won)).current,
-      solo: {
-        games: soloGames.length,
-        wins: soloWins,
-        winRate: soloGames.length ? soloWins / soloGames.length : 0,
-      },
-      eloHistory: [
-        { game: 0, elo: startingElo, eloChange: 0, date: user._creationTime },
-        ...rows.map((r, i) => ({
-          game: i + 1,
-          elo: r.eloAfter,
-          eloChange: r.eloChange,
-          date: r.endTime,
-        })),
-      ],
+      placement: { played: user.ranked.games, required: PLACEMENT_MATCHES },
+      peakElo: user.peakElo,
+      ranked: { ...user.ranked, winRate: winRate(user.ranked) },
+      solo: { ...user.solo, winRate: winRate(user.solo) },
+      eloHistory: eloHistory(user, rows),
       recentGames: rows.slice().reverse(),
       isSelf: requestingUser?._id === user._id,
     };
@@ -452,21 +334,12 @@ export const renameUser = mutation({
       throw new ConvexError("This username is taken");
     }
 
-    const usesGeneratedAvatar =
-      !user.image || user.image.startsWith("https://ui-avatars.com/");
+    const usesGeneratedAvatar = !user.image || user.image.startsWith("https://ui-avatars.com/");
     await ctx.db.patch(user._id, {
       name,
       lowercaseName,
       ...(usesGeneratedAvatar ? { image: avatarUrlFor(name) } : {}),
     });
-
-    const queueEntries = await ctx.db
-      .query("matchQueue")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .collect();
-    for (const entry of queueEntries) {
-      await ctx.db.patch(entry._id, { userName: name });
-    }
     return name;
   },
 });
@@ -477,75 +350,26 @@ export const deleteUserAccount = mutation({
     const user = await requireUser(ctx);
 
     // Resolve anything in progress so opponents aren't left hanging.
-    const activeMatch = await getActiveMatchFor(ctx, user._id);
-    if (activeMatch) {
-      await finishMatch(
-        ctx,
-        activeMatch,
-        activeMatch.userId1 === user._id ? 2 : 1,
-        "forfeit",
-      );
-    }
+    await forfeitActiveMatch(ctx, user._id);
+    await endActiveGame(ctx, user._id);
+    await leaveQueue(ctx, user._id);
 
     // Sessions are removed by the client calling signOut() afterwards.
     const accounts = await ctx.db
       .query("authAccounts")
       .withIndex("userIdAndProvider", (q) => q.eq("userId", user._id))
       .collect();
-    for (const account of accounts) {
-      await ctx.db.delete(account._id);
-    }
+    for (const account of accounts) await ctx.db.delete(account._id);
 
-    // Hide solo games from leaderboards and end any game in progress.
-    const soloGames = await ctx.db
-      .query("games")
+    // Hide solo games from leaderboards.
+    const games = await ctx.db
+      .query("soloGames")
       .withIndex("by_user", (q) => q.eq("userId", user._id))
       .collect();
-    for (const game of soloGames) {
-      if (!game.isCompleted && game.timeoutScheduleId) {
-        await ctx.scheduler.cancel(game.timeoutScheduleId);
-      }
-      await ctx.db.patch(game._id, {
-        userStatus: "deleted",
-        ...(game.isCompleted
-          ? {}
-          : { isCompleted: true, isAbandoned: true, timeoutScheduleId: undefined }),
-      });
-    }
+    for (const game of games) await ctx.db.patch(game._id, { hidden: true });
 
-    const queueEntries = await ctx.db
-      .query("matchQueue")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .collect();
-    for (const entry of queueEntries) {
-      await ctx.db.delete(entry._id);
-    }
-
-    // Anonymise the name snapshots stored on ranked matches.
-    const [asUser1, asUser2] = await Promise.all([
-      ctx.db
-        .query("rankedMatches")
-        .withIndex("by_user1", (q) => q.eq("userId1", user._id))
-        .collect(),
-      ctx.db
-        .query("rankedMatches")
-        .withIndex("by_user2", (q) => q.eq("userId2", user._id))
-        .collect(),
-    ]);
-    for (const match of asUser1) {
-      await ctx.db.patch(match._id, {
-        userName1: DELETED_USER_NAME,
-        winner: match.winnerId === user._id ? DELETED_USER_NAME : match.winner,
-      });
-    }
-    for (const match of asUser2) {
-      await ctx.db.patch(match._id, {
-        userName2: DELETED_USER_NAME,
-        winner: match.winnerId === user._id ? DELETED_USER_NAME : match.winner,
-      });
-    }
-
-    // Strip personal info but keep the document so match history stays valid.
+    // Keep the document so opponents' match history stays intact; every read
+    // path shows it as "deleted-user".
     await ctx.db.patch(user._id, {
       name: DELETED_USER_NAME,
       lowercaseName: `${DELETED_USER_NAME}-${user._id}`,
@@ -554,7 +378,7 @@ export const deleteUserAccount = mutation({
       emailVerificationTime: undefined,
       phone: undefined,
       phoneVerificationTime: undefined,
-      status: "deleted",
+      deletedAt: Date.now(),
     });
   },
 });

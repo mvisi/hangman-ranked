@@ -1,119 +1,114 @@
 import { v } from "convex/values";
 import { Doc, Id } from "./_generated/dataModel";
 import { query, QueryCtx } from "./_generated/server";
-import { displayName } from "./ranked";
-import { isRankedPlayer } from "./lib/utils";
+import { PLACEMENT_MATCHES } from "./lib/elo";
+import { displayName, isOnLeaderboard } from "./lib/utils";
 
 const LEADERBOARD_SIZE = 100;
+/** How many top games to scan when picking each player's best one. */
+const SOLO_SCAN_LIMIT = 2000;
 
-async function getUsersById(ctx: QueryCtx, ids: Id<"users">[]) {
-  const unique = [...new Set(ids)];
-  const users = await Promise.all(unique.map((id) => ctx.db.get(id)));
-  return new Map(
-    users
-      .filter((u): u is Doc<"users"> => u !== null)
-      .map((u) => [u._id, u] as const),
-  );
+/** Ordering shared by the Elo leaderboard and profile positions. */
+export function compareRankedPlayers(a: Doc<"users">, b: Doc<"users">) {
+  if (b.elo !== a.elo) return b.elo - a.elo;
+  if (b.ranked.games !== a.ranked.games) return b.ranked.games - a.ranked.games;
+  return a._creationTime - b._creationTime;
+}
+
+/** 1-based position on the Elo leaderboard, or null while in placement. */
+export async function leaderboardPosition(ctx: QueryCtx, user: Doc<"users">) {
+  if (!isOnLeaderboard(user)) return null;
+  const contenders = await ctx.db
+    .query("users")
+    .withIndex("by_elo", (q) => q.gte("elo", user.elo))
+    .filter((q) =>
+      q.and(
+        q.gte(q.field("ranked.games"), PLACEMENT_MATCHES),
+        q.eq(q.field("deletedAt"), undefined),
+      ),
+    )
+    .collect();
+  return contenders.filter((other) => compareRankedPlayers(other, user) < 0).length + 1;
 }
 
 /**
- * Best solo games. `sort: "score"` ranks by points; `sort: "time"` ranks the
- * fastest wins.
+ * Each player's best solo game. `sort: "score"` ranks by points;
+ * `sort: "time"` ranks the fastest wins.
  */
 export const getSoloLeaderboard = query({
   args: { sort: v.optional(v.union(v.literal("score"), v.literal("time"))) },
   handler: async (ctx, { sort = "score" }) => {
-    const visible = (game: Doc<"games">) =>
-      game.userStatus !== "deleted" && game.userStatus !== "banned";
-
-    const topGames =
+    const won =
       sort === "time"
-        ? await ctx.db
-            .query("games")
-            .withIndex("total_time", (q) => q.gt("totalTime", 0))
-            .filter((q) =>
-              q.and(
-                q.eq(q.field("isWon"), true),
-                q.neq(q.field("userStatus"), "deleted"),
-                q.neq(q.field("userStatus"), "banned"),
-              ),
-            )
+        ? ctx.db
+            .query("soloGames")
+            .withIndex("by_status_duration", (q) => q.eq("status", "won"))
             .order("asc")
-            .take(LEADERBOARD_SIZE)
-        : await ctx.db
-            .query("games")
-            .withIndex("score", (q) => q.gte("score", 1))
-            .filter((q) =>
-              q.and(
-                q.neq(q.field("userStatus"), "deleted"),
-                q.neq(q.field("userStatus"), "banned"),
-              ),
-            )
-            .order("desc")
-            .take(LEADERBOARD_SIZE);
+        : ctx.db
+            .query("soloGames")
+            .withIndex("by_status_score", (q) => q.eq("status", "won"))
+            .order("desc");
+    const games = await won.filter((q) => q.eq(q.field("hidden"), false)).take(SOLO_SCAN_LIMIT);
 
-    const users = await getUsersById(
-      ctx,
-      topGames.map((g) => g.userId),
+    const best: Doc<"soloGames">[] = [];
+    const seen = new Set<Id<"users">>();
+    for (const game of games) {
+      if (seen.has(game.userId)) continue;
+      seen.add(game.userId);
+      best.push(game);
+      if (best.length === LEADERBOARD_SIZE) break;
+    }
+
+    const users = new Map(
+      (await Promise.all(best.map((g) => ctx.db.get(g.userId))))
+        .filter((u): u is Doc<"users"> => u !== null)
+        .map((u) => [u._id, u] as const),
     );
 
-    return topGames
-      .filter((game) => visible(game) && users.get(game.userId)?.status !== "deleted")
-      .map((game, i) => ({
+    return best.map((game, i) => {
+      const user = users.get(game.userId);
+      return {
         _id: game._id,
         rank: i + 1,
-        user: displayName(users.get(game.userId) ?? null, "Unknown"),
-        image: users.get(game.userId)?.image,
-        score: game.score ?? 0,
+        user: displayName(user),
+        image: user?.image,
+        score: game.score,
         word: game.word,
         mistakes: game.mistakes,
-        attempts: game.attempts,
-        time: game.totalTime ?? (game.endTime ?? game.lastUpdate) - game.startTime,
-        playedAt: game.endTime ?? game._creationTime,
-      }));
+        attempts: game.guesses.length,
+        time: game.durationMs ?? 0,
+        playedAt: game.endedAt ?? game.lastGuessAt,
+      };
+    });
   },
 });
-
-/** Ordering used by both the Elo leaderboard and profile ranks. */
-export function compareRankedPlayers(a: Doc<"users">, b: Doc<"users">) {
-  if (b.elo !== a.elo) return b.elo - a.elo;
-  const gamesA = a.userStats?.gamesPlayed ?? 0;
-  const gamesB = b.userStats?.gamesPlayed ?? 0;
-  if (gamesB !== gamesA) return gamesB - gamesA;
-  return a._creationTime - b._creationTime;
-}
 
 export const getEloLeaderboard = query({
   args: {},
   handler: async (ctx) => {
-    // Filter inside the query so `take` always yields up to 100 real players,
-    // not 100 rows of which most have never played ranked.
+    // Filter inside the query so `take` yields up to 100 placed players.
     const players = await ctx.db
       .query("users")
       .withIndex("by_elo")
       .order("desc")
       .filter((q) =>
         q.and(
-          q.gt(q.field("userStats.gamesPlayed"), 0),
-          q.neq(q.field("status"), "deleted"),
-          q.neq(q.field("status"), "banned"),
+          q.gte(q.field("ranked.games"), PLACEMENT_MATCHES),
+          q.eq(q.field("deletedAt"), undefined),
         ),
       )
       .take(LEADERBOARD_SIZE);
 
-    return players
-      .filter(isRankedPlayer)
-      .sort(compareRankedPlayers)
-      .map((player, i) => ({
-        _id: player._id,
-        rank: i + 1,
-        user: player.name ?? "Unknown",
-        image: player.image,
-        elo: player.elo,
-        games: player.userStats.gamesPlayed,
-        wins: player.userStats.wins,
-        winPct: player.userStats.winRate,
-        lastSeen: player.userStats.lastSeen,
-      }));
+    return players.sort(compareRankedPlayers).map((player, i) => ({
+      _id: player._id,
+      rank: i + 1,
+      user: displayName(player),
+      image: player.image,
+      elo: player.elo,
+      games: player.ranked.games,
+      wins: player.ranked.wins,
+      winPct: player.ranked.games ? player.ranked.wins / player.ranked.games : 0,
+      lastSeen: player.lastSeenAt,
+    }));
   },
 });

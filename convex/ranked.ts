@@ -14,185 +14,128 @@ import { getEloDelta } from "./lib/elo";
 import {
   applyGuess,
   countRevealed,
+  deriveState,
   InvalidGuessError,
   maskWord,
   pickRandomWord,
   RANKED_TURN_TIMEOUT_MS,
 } from "./lib/game";
-import { DELETED_USER_NAME } from "./lib/username";
-import { getUpdatedStats } from "./lib/utils";
+import { bumpStats, displayName } from "./lib/utils";
 
 /** Clients heartbeat every ~10s; entries silent for longer are ignored. */
 export const QUEUE_STALE_MS = 30_000;
 /** Extra time the sweeper waits past a deadline before resolving a match. */
 const SWEEP_GRACE_MS = 15_000;
 
-type Side = 1 | 2;
-type EndReason = NonNullable<Doc<"rankedMatches">["endReason"]>;
+type EndReason = NonNullable<Doc<"matches">["endReason"]>;
+type Player = Doc<"matchPlayers">;
 
-const other = (side: Side): Side => (side === 1 ? 2 : 1);
-
-function sideOf(match: Doc<"rankedMatches">, userId: Id<"users">): Side {
-  return match.userId1 === userId ? 1 : 2;
+export async function getActivePlayerFor(ctx: QueryCtx, userId: Id<"users">) {
+  return await ctx.db
+    .query("matchPlayers")
+    .withIndex("by_user_active_ended", (q) => q.eq("userId", userId).eq("active", true))
+    .first();
 }
 
-/** Reads one player's half of a match document. */
-function sideState(match: Doc<"rankedMatches">, side: Side) {
-  return side === 1
-    ? {
-        userId: match.userId1,
-        userName: match.userName1,
-        userElo: match.userElo1,
-        guessedLetters: match.guessedLetters1,
-        correctGuesses: match.correctGuesses1,
-        wrongGuesses: match.wrongGuesses1,
-        attempts: match.attempts1,
-        mistakes: match.mistakes1,
-        lastUpdate: match.lastUpdateFrom1,
-        timeoutScheduleId: match.timeoutScheduleIdFor1,
-      }
-    : {
-        userId: match.userId2,
-        userName: match.userName2,
-        userElo: match.userElo2,
-        guessedLetters: match.guessedLetters2,
-        correctGuesses: match.correctGuesses2,
-        wrongGuesses: match.wrongGuesses2,
-        attempts: match.attempts2,
-        mistakes: match.mistakes2,
-        lastUpdate: match.lastUpdateFrom2,
-        timeoutScheduleId: match.timeoutScheduleIdFor2,
-      };
+async function getPlayers(ctx: QueryCtx, matchId: Id<"matches">) {
+  const players = await ctx.db
+    .query("matchPlayers")
+    .withIndex("by_match", (q) => q.eq("matchId", matchId))
+    .collect();
+  if (players.length !== 2) throw new Error(`Match ${matchId} has ${players.length} players`);
+  return players as [Player, Player];
 }
 
-type SideUpdate = {
-  guessedLetters: string[];
-  correctGuesses: string[];
-  wrongGuesses: string[];
-  attempts: number;
-  mistakes: number;
-  lastUpdate: number;
-  timeoutScheduleId: Id<"_scheduled_functions"> | undefined;
-};
-
-/** Builds a patch for one player's half of a match document. */
-function sidePatch(side: Side, u: SideUpdate): Partial<Doc<"rankedMatches">> {
-  return side === 1
-    ? {
-        guessedLetters1: u.guessedLetters,
-        correctGuesses1: u.correctGuesses,
-        wrongGuesses1: u.wrongGuesses,
-        attempts1: u.attempts,
-        mistakes1: u.mistakes,
-        lastUpdateFrom1: u.lastUpdate,
-        timeoutScheduleIdFor1: u.timeoutScheduleId,
-      }
-    : {
-        guessedLetters2: u.guessedLetters,
-        correctGuesses2: u.correctGuesses,
-        wrongGuesses2: u.wrongGuesses,
-        attempts2: u.attempts,
-        mistakes2: u.mistakes,
-        lastUpdateFrom2: u.lastUpdate,
-        timeoutScheduleIdFor2: u.timeoutScheduleId,
-      };
-}
-
-/** Current public name of a user, falling back to a snapshot. */
-export function displayName(user: Doc<"users"> | null, fallback: string) {
-  if (!user) return fallback;
-  if (user.status === "deleted") return DELETED_USER_NAME;
-  return user.name ?? fallback;
-}
-
-export async function getActiveMatchFor(ctx: QueryCtx, userId: Id<"users">) {
-  const [asUser1, asUser2] = await Promise.all([
-    ctx.db
-      .query("rankedMatches")
-      .withIndex("by_user1_completion", (q) =>
-        q.eq("userId1", userId).eq("isCompleted", false),
-      )
-      .first(),
-    ctx.db
-      .query("rankedMatches")
-      .withIndex("by_user2_completion", (q) =>
-        q.eq("userId2", userId).eq("isCompleted", false),
-      )
-      .first(),
-  ]);
-  return asUser1 ?? asUser2;
-}
-
-function isQueueEntryStale(entry: Doc<"matchQueue">, now: number) {
-  return now - (entry.lastHeartbeat ?? entry._creationTime) > QUEUE_STALE_MS;
+async function scheduleTurnTimeout(ctx: MutationCtx, playerId: Id<"matchPlayers">, lastGuessAt: number) {
+  return await ctx.scheduler.runAfter(RANKED_TURN_TIMEOUT_MS, internal.ranked.turnTimeout, {
+    playerId,
+    lastGuessAt,
+  });
 }
 
 /**
- * Ends a match: applies Elo and stats to both players, cancels any pending
- * timeouts and records how the match ended. Every completion path goes
- * through here so the bookkeeping can't drift.
+ * Ends a match: applies Elo and stats to both players, cancels their turn
+ * timers and records how it ended. Every completion path goes through here.
+ * `runningTimer` is the player whose timer is executing this code (a
+ * scheduled function can't cancel itself).
  */
-export async function finishMatch(
+async function finishMatch(
   ctx: MutationCtx,
-  match: Doc<"rankedMatches">,
-  winnerSide: Side,
+  matchId: Id<"matches">,
+  winnerUserId: Id<"users">,
   endReason: EndReason,
-  extraPatch: Partial<Doc<"rankedMatches">> = {},
-  /** Side whose turn timer is the job running this code (it can't cancel itself). */
-  runningTimerSide?: Side,
+  runningTimer?: Id<"matchPlayers">,
 ) {
-  const [user1, user2] = await Promise.all([
-    ctx.db.get(match.userId1),
-    ctx.db.get(match.userId2),
+  const match = await ctx.db.get(matchId);
+  if (!match || match.status !== "active") return;
+  const players = await getPlayers(ctx, matchId);
+  const winner = players.find((p) => p.userId === winnerUserId)!;
+  const loser = players.find((p) => p.userId !== winnerUserId)!;
+
+  const [winnerUser, loserUser] = await Promise.all([
+    ctx.db.get(winner.userId),
+    ctx.db.get(loser.userId),
   ]);
-  // Use live ratings so simultaneous matches can't compute from stale values.
-  const elo1 = user1?.elo ?? match.userElo1;
-  const elo2 = user2?.elo ?? match.userElo2;
-  const eloChange = getEloDelta(elo1, elo2, winnerSide === 1);
-
-  if (user1) {
-    await ctx.db.patch(user1._id, {
-      elo: elo1 + eloChange,
-      userStats: getUpdatedStats(user1, winnerSide === 1),
-    });
-  }
-  if (user2) {
-    await ctx.db.patch(user2._id, {
-      elo: elo2 - eloChange,
-      userStats: getUpdatedStats(user2, winnerSide === 2),
-    });
-  }
-
-  const timers = [
-    runningTimerSide === 1 ? undefined : match.timeoutScheduleIdFor1,
-    runningTimerSide === 2 ? undefined : match.timeoutScheduleIdFor2,
-  ];
-  for (const id of timers) {
-    if (id) await ctx.scheduler.cancel(id);
-  }
-
-  const winner = winnerSide === 1 ? user1 : user2;
+  // Live ratings, so concurrent matches never compute from stale values.
+  const winnerElo = winnerUser?.elo ?? winner.eloBefore;
+  const loserElo = loserUser?.elo ?? loser.eloBefore;
+  const delta = getEloDelta(winnerElo, loserElo, true);
   const now = Date.now();
-  await ctx.db.patch(match._id, {
-    ...extraPatch,
-    isCompleted: true,
-    isAbandoned: endReason === "timeout" || endReason === "forfeit",
+
+  for (const [player, user, eloBefore, opponentEloBefore, change, won] of [
+    [winner, winnerUser, winnerElo, loserElo, delta, true],
+    [loser, loserUser, loserElo, winnerElo, -delta, false],
+  ] as const) {
+    if (player.timeoutJobId && player._id !== runningTimer) {
+      await ctx.scheduler.cancel(player.timeoutJobId);
+    }
+    const eloAfter = eloBefore + change;
+    await ctx.db.patch(player._id, {
+      active: false,
+      result: won ? "won" : "lost",
+      eloBefore,
+      opponentEloBefore,
+      eloAfter,
+      endedAt: now,
+      timeoutJobId: undefined,
+    });
+    if (user && !user.deletedAt) {
+      await ctx.db.patch(user._id, {
+        elo: eloAfter,
+        peakElo: Math.max(user.peakElo, eloAfter),
+        ranked: bumpStats(user.ranked, won),
+        lastSeenAt: now,
+      });
+    }
+  }
+
+  await ctx.db.patch(matchId, {
+    status: "finished",
+    endedAt: now,
+    winnerId: winnerUserId,
     endReason,
-    endTime: now,
-    totalTime: now - match.startTime,
-    winnerId: winner?._id ?? (winnerSide === 1 ? match.userId1 : match.userId2),
-    winner: displayName(
-      winner,
-      winnerSide === 1 ? match.userName1 : match.userName2,
-    ),
-    eloChange,
-    // Record the ratings the change was computed from, so
-    // `userElo + eloChange` is always the rating after the match.
-    userElo1: elo1,
-    userElo2: elo2,
-    timeoutScheduleIdFor1: undefined,
-    timeoutScheduleIdFor2: undefined,
   });
+}
+
+/** Removes a match nobody played. Nobody's rating changes. */
+async function cancelMatch(ctx: MutationCtx, matchId: Id<"matches">, runningTimer?: Id<"matchPlayers">) {
+  for (const player of await getPlayers(ctx, matchId)) {
+    if (player.timeoutJobId && player._id !== runningTimer) {
+      await ctx.scheduler.cancel(player.timeoutJobId);
+    }
+    await ctx.db.delete(player._id);
+  }
+  await ctx.db.delete(matchId);
+}
+
+/** Resigns the user's match in progress, if any (also used on account deletion). */
+export async function forfeitActiveMatch(ctx: MutationCtx, userId: Id<"users">) {
+  const player = await getActivePlayerFor(ctx, userId);
+  if (player) await finishMatch(ctx, player.matchId, player.opponentId, "forfeit");
+}
+
+function isStale(entry: Doc<"matchQueue">, now: number) {
+  return now - entry.lastHeartbeat > QUEUE_STALE_MS;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -203,82 +146,68 @@ export const enterMatchmaking = mutation({
   args: {},
   handler: async (ctx) => {
     const user = await requireUser(ctx);
-    if (await getActiveMatchFor(ctx, user._id)) {
+    if (await getActivePlayerFor(ctx, user._id)) {
       throw new ConvexError("You are already in a match");
     }
 
     const now = Date.now();
-    const queue = await ctx.db.query("matchQueue").collect();
-
-    const ownEntry = queue.find((entry) => entry.userId === user._id);
-    if (ownEntry) {
-      await ctx.db.patch(ownEntry._id, { lastHeartbeat: now });
+    const own = await ctx.db
+      .query("matchQueue")
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
+      .first();
+    if (own) {
+      await ctx.db.patch(own._id, { lastHeartbeat: now });
       return { status: "queued" as const };
     }
 
-    // Closest rating first, so matches are as fair as the queue allows.
-    const candidates = [];
-    for (const entry of queue) {
-      if (isQueueEntryStale(entry, now)) {
-        await ctx.db.delete(entry._id);
-      } else {
-        candidates.push(entry);
-      }
-    }
-    candidates.sort(
-      (a, b) => Math.abs(a.userElo - user.elo) - Math.abs(b.userElo - user.elo),
-    );
+    // Live entries only, closest rating first, so matches are as fair as the
+    // queue allows.
+    const candidates = (
+      await ctx.db
+        .query("matchQueue")
+        .withIndex("by_heartbeat", (q) => q.gte("lastHeartbeat", now - QUEUE_STALE_MS))
+        .collect()
+    ).sort((a, b) => Math.abs(a.elo - user.elo) - Math.abs(b.elo - user.elo));
 
     for (const entry of candidates) {
       await ctx.db.delete(entry._id);
       const opponent = await ctx.db.get(entry.userId);
-      if (
-        !opponent ||
-        opponent.status === "deleted" ||
-        (await getActiveMatchFor(ctx, opponent._id))
-      ) {
+      if (!opponent || opponent.deletedAt || (await getActivePlayerFor(ctx, opponent._id))) {
         continue;
       }
 
-      const matchId = await ctx.db.insert("rankedMatches", {
-        userId1: opponent._id,
-        userId2: user._id,
-        userName1: opponent.name ?? "Unknown",
-        userName2: user.name ?? "Unknown",
-        userElo1: opponent.elo,
-        userElo2: user.elo,
+      const matchId = await ctx.db.insert("matches", {
         word: pickRandomWord(words),
-        guessedLetters1: [],
-        guessedLetters2: [],
-        correctGuesses1: [],
-        correctGuesses2: [],
-        wrongGuesses1: [],
-        wrongGuesses2: [],
-        attempts1: 0,
-        attempts2: 0,
-        mistakes1: 0,
-        mistakes2: 0,
-        startTime: now,
-        lastUpdateFrom1: now,
-        lastUpdateFrom2: now,
-        isCompleted: false,
-        isAbandoned: false,
+        status: "active",
+        startedAt: now,
       });
-
-      // If a player never makes a move, they lose (or the match is dropped
-      // when nobody moved at all).
-      await ctx.scheduler.runAfter(
-        RANKED_TURN_TIMEOUT_MS,
-        internal.ranked.timeoutStaleDelete,
-        { matchId, lastUpdate: now },
-      );
+      for (const [me, them] of [
+        [opponent, user],
+        [user, opponent],
+      ] as const) {
+        const playerId = await ctx.db.insert("matchPlayers", {
+          matchId,
+          userId: me._id,
+          opponentId: them._id,
+          guesses: [],
+          mistakes: 0,
+          lastGuessAt: now,
+          active: true,
+          eloBefore: me.elo,
+          opponentEloBefore: them.elo,
+        });
+        // A player who never moves runs out of time like any other turn.
+        await ctx.db.patch(playerId, {
+          timeoutJobId: await scheduleTurnTimeout(ctx, playerId, now),
+        });
+      }
       return { status: "matched" as const, matchId };
     }
 
     await ctx.db.insert("matchQueue", {
       userId: user._id,
-      userName: user.name ?? "Unknown",
-      userElo: user.elo,
+      elo: user.elo,
+      joinedAt: now,
       lastHeartbeat: now,
     });
     return { status: "queued" as const };
@@ -301,18 +230,19 @@ export const queueHeartbeat = mutation({
   },
 });
 
+export async function leaveQueue(ctx: MutationCtx, userId: Id<"users">) {
+  const entries = await ctx.db
+    .query("matchQueue")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .collect();
+  for (const entry of entries) await ctx.db.delete(entry._id);
+}
+
 export const exitMatchmaking = mutation({
   args: {},
   handler: async (ctx) => {
     const user = await getLoggedInUserHelper(ctx);
-    if (!user) return;
-    const entries = await ctx.db
-      .query("matchQueue")
-      .withIndex("by_user", (q) => q.eq("userId", user._id))
-      .collect();
-    for (const entry of entries) {
-      await ctx.db.delete(entry._id);
-    }
+    if (user) await leaveQueue(ctx, user._id);
   },
 });
 
@@ -320,20 +250,21 @@ export const queueInfo = query({
   args: {},
   handler: async (ctx) => {
     const user = await getLoggedInUserHelper(ctx);
-    if (!user) {
-      return { isInQueue: false, queueEntryTime: undefined, playersSearching: 0 };
-    }
-    const now = Date.now();
-    const queue = await ctx.db.query("matchQueue").collect();
-    const own = queue.find((entry) => entry.userId === user._id);
-    const playersSearching = queue.filter(
-      (entry) => entry.userId !== user._id && !isQueueEntryStale(entry, now),
-    ).length;
+    if (!user) return { isInQueue: false, queueEntryTime: undefined, playersSearching: 0 };
+
+    const own = await ctx.db
+      .query("matchQueue")
+      .withIndex("by_user", (q) => q.eq("userId", user._id))
+      .first();
+    const live = await ctx.db
+      .query("matchQueue")
+      .withIndex("by_heartbeat", (q) => q.gte("lastHeartbeat", Date.now() - QUEUE_STALE_MS))
+      .collect();
 
     return {
       isInQueue: !!own,
-      queueEntryTime: own?._creationTime,
-      playersSearching,
+      queueEntryTime: own?.joinedAt,
+      playersSearching: live.filter((e) => e.userId !== user._id).length,
     };
   },
 });
@@ -343,45 +274,44 @@ export const queueInfo = query({
 /* -------------------------------------------------------------------------- */
 
 /**
- * The signed-in user's match in progress. Only the player's own guesses are
- * returned: the opponent's progress is reduced to counts so it can't leak
- * letters of the word.
+ * The signed-in user's match in progress. The opponent's progress is reduced
+ * to counts so it can't leak letters of the word.
  */
 export const getActiveMatch = query({
   args: {},
   handler: async (ctx) => {
     const user = await getLoggedInUserHelper(ctx);
     if (!user) return null;
-    const match = await getActiveMatchFor(ctx, user._id);
+    const me = await getActivePlayerFor(ctx, user._id);
+    if (!me) return null;
+    const match = await ctx.db.get(me.matchId);
     if (!match) return null;
-
-    const mySide = sideOf(match, user._id);
-    const me = sideState(match, mySide);
-    const them = sideState(match, other(mySide));
+    const them = (await getPlayers(ctx, match._id)).find((p) => p._id !== me._id)!;
     const opponent = await ctx.db.get(them.userId);
+    const state = deriveState(match.word, me.guesses);
 
     return {
       _id: match._id,
-      startTime: match.startTime,
+      startTime: match.startedAt,
       wordLength: match.word.length,
-      displayWord: maskWord(match.word, me.guessedLetters),
-      guessedLetters: me.guessedLetters,
-      correctGuesses: me.correctGuesses,
-      wrongGuesses: me.wrongGuesses,
-      attempts: me.attempts,
-      mistakes: me.mistakes,
-      lastUpdate: me.lastUpdate,
-      deadline: me.lastUpdate + RANKED_TURN_TIMEOUT_MS,
-      revealed: countRevealed(match.word, me.guessedLetters),
+      displayWord: maskWord(match.word, me.guesses),
+      guessedLetters: state.guessedLetters,
+      correctGuesses: state.correctGuesses,
+      wrongGuesses: state.wrongGuesses,
+      attempts: state.attempts,
+      mistakes: state.mistakes,
+      lastUpdate: me.lastGuessAt,
+      deadline: me.lastGuessAt + RANKED_TURN_TIMEOUT_MS,
+      revealed: countRevealed(match.word, me.guesses),
       myElo: user.elo,
       opponent: {
-        name: displayName(opponent, them.userName),
-        elo: opponent?.elo ?? them.userElo,
+        name: displayName(opponent),
+        elo: opponent?.elo ?? them.eloBefore,
         image: opponent?.image,
-        attempts: them.attempts,
+        attempts: them.guesses.length,
         mistakes: them.mistakes,
-        revealed: countRevealed(match.word, them.guessedLetters),
-        lastUpdate: them.lastUpdate,
+        revealed: countRevealed(match.word, them.guesses),
+        lastUpdate: them.lastGuessAt,
       },
     };
   },
@@ -391,54 +321,38 @@ export const makeGuess = mutation({
   args: { guess: v.string() },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
-    const match = await getActiveMatchFor(ctx, user._id);
-    if (!match) {
-      throw new ConvexError("No active match found");
-    }
-
-    const side = sideOf(match, user._id);
-    const me = sideState(match, side);
+    const me = await getActivePlayerFor(ctx, user._id);
+    if (!me) throw new ConvexError("No active match found");
+    const match = (await ctx.db.get(me.matchId))!;
 
     let outcome;
     try {
-      outcome = applyGuess({ word: match.word, ...me }, args.guess);
+      outcome = applyGuess(deriveState(match.word, me.guesses), args.guess);
     } catch (e) {
       if (e instanceof InvalidGuessError) throw new ConvexError(e.message);
       throw e;
     }
 
     const now = Date.now();
-    const update: SideUpdate = {
-      guessedLetters: outcome.guessedLetters,
-      correctGuesses: outcome.correctGuesses,
-      wrongGuesses: outcome.wrongGuesses,
-      attempts: outcome.attempts,
+    await ctx.db.patch(me._id, {
+      guesses: outcome.guessedLetters,
       mistakes: outcome.mistakes,
-      lastUpdate: now,
-      timeoutScheduleId: undefined,
-    };
+      lastGuessAt: now,
+    });
 
     if (outcome.isCompleted) {
-      // Solving the word wins; running out of lives hands the win over.
+      // Solving wins; running out of lives hands the win to the opponent.
       await finishMatch(
         ctx,
-        match,
-        outcome.isWon ? side : other(side),
+        match._id,
+        outcome.isWon ? me.userId : me.opponentId,
         outcome.isWon ? "solved" : "failed",
-        sidePatch(side, update),
       );
       return { isCorrect: outcome.isCorrect, isCompleted: true, isWon: outcome.isWon };
     }
 
-    if (me.timeoutScheduleId) {
-      await ctx.scheduler.cancel(me.timeoutScheduleId);
-    }
-    update.timeoutScheduleId = await ctx.scheduler.runAfter(
-      RANKED_TURN_TIMEOUT_MS,
-      internal.ranked.timeoutSchedule,
-      { gameId: match._id, lastUpdate: now, userId: user._id },
-    );
-    await ctx.db.patch(match._id, sidePatch(side, update));
+    if (me.timeoutJobId) await ctx.scheduler.cancel(me.timeoutJobId);
+    await ctx.db.patch(me._id, { timeoutJobId: await scheduleTurnTimeout(ctx, me._id, now) });
     return { isCorrect: outcome.isCorrect, isCompleted: false, isWon: false };
   },
 });
@@ -448,9 +362,7 @@ export const forfeitMatch = mutation({
   args: {},
   handler: async (ctx) => {
     const user = await requireUser(ctx);
-    const match = await getActiveMatchFor(ctx, user._id);
-    if (!match) return;
-    await finishMatch(ctx, match, other(sideOf(match, user._id)), "forfeit");
+    await forfeitActiveMatch(ctx, user._id);
   },
 });
 
@@ -460,103 +372,51 @@ export const getLastMatchResult = query({
   handler: async (ctx) => {
     const user = await getLoggedInUserHelper(ctx);
     if (!user) return null;
-
-    const [asUser1, asUser2] = await Promise.all([
-      ctx.db
-        .query("rankedMatches")
-        .withIndex("by_user1_completion", (q) =>
-          q.eq("userId1", user._id).eq("isCompleted", true),
-        )
-        .order("desc")
-        .first(),
-      ctx.db
-        .query("rankedMatches")
-        .withIndex("by_user2_completion", (q) =>
-          q.eq("userId2", user._id).eq("isCompleted", true),
-        )
-        .order("desc")
-        .first(),
-    ]);
-    const match =
-      asUser1 && asUser2
-        ? (asUser1.endTime ?? 0) > (asUser2.endTime ?? 0)
-          ? asUser1
-          : asUser2
-        : (asUser1 ?? asUser2);
+    const me = await ctx.db
+      .query("matchPlayers")
+      .withIndex("by_user_active_ended", (q) => q.eq("userId", user._id).eq("active", false))
+      .order("desc")
+      .first();
+    if (!me) return null;
+    const [match, opponent] = await Promise.all([ctx.db.get(me.matchId), ctx.db.get(me.opponentId)]);
     if (!match) return null;
 
-    const side = sideOf(match, user._id);
-    const me = sideState(match, side);
-    const them = sideState(match, other(side));
-    const opponent = await ctx.db.get(them.userId);
-    const eloChange =
-      side === 1 ? (match.eloChange ?? 0) : -(match.eloChange ?? 0);
-
+    const eloAfter = me.eloAfter ?? me.eloBefore;
     return {
       _id: match._id,
       word: match.word,
-      won: match.winnerId === user._id,
+      won: me.result === "won",
       endReason: match.endReason,
-      endTime: match.endTime ?? match._creationTime,
-      eloChange,
-      eloAfter: me.userElo + eloChange,
-      guessedLetters: me.guessedLetters,
-      attempts: me.attempts,
+      endTime: match.endedAt ?? match.startedAt,
+      eloChange: eloAfter - me.eloBefore,
+      eloAfter,
+      guessedLetters: me.guesses,
+      attempts: me.guesses.length,
       mistakes: me.mistakes,
-      opponentName: displayName(opponent, them.userName),
+      opponentName: displayName(opponent),
     };
   },
 });
 
 /* -------------------------------------------------------------------------- */
-/*                              Scheduled cleanup                             */
+/*                                   Timers                                   */
 /* -------------------------------------------------------------------------- */
 
-export const timeoutSchedule = internalMutation({
-  args: {
-    gameId: v.id("rankedMatches"),
-    lastUpdate: v.number(),
-    userId: v.id("users"),
-    // Legacy arguments from older deployments; no longer needed.
-    isUser1: v.optional(v.boolean()),
-    opponentId: v.optional(v.id("users")),
-    opponentName: v.optional(v.string()),
-  },
-  handler: async (ctx, { gameId, lastUpdate, userId }) => {
-    const match = await ctx.db.get(gameId);
-    if (!match || match.isCompleted) return;
-    const side = sideOf(match, userId);
-    // The player has moved since this timeout was scheduled.
-    if (sideState(match, side).lastUpdate !== lastUpdate) return;
-    await finishMatch(ctx, match, other(side), "timeout", {}, side);
-  },
-});
-
 /**
- * Runs one turn-length after a match starts: drops the match if nobody moved,
- * or times out the player who never made a move.
+ * A player's turn ran out. If neither player ever moved the match is
+ * cancelled; otherwise the silent player loses.
  */
-export const timeoutStaleDelete = internalMutation({
-  args: {
-    matchId: v.id("rankedMatches"),
-    // Kept for compatibility with already-scheduled jobs; idleness is now
-    // judged by move count, which can't collide with the start timestamp.
-    lastUpdate: v.number(),
-  },
-  handler: async (ctx, { matchId }) => {
-    const match = await ctx.db.get(matchId);
-    if (!match || match.isCompleted) return;
-
-    const idle1 = match.attempts1 === 0;
-    const idle2 = match.attempts2 === 0;
-
-    if (idle1 && idle2) {
-      await ctx.db.delete(matchId);
-    } else if (idle1 !== idle2) {
-      // Exactly one player never moved: they lose.
-      await finishMatch(ctx, match, idle1 ? 2 : 1, "timeout");
+export const turnTimeout = internalMutation({
+  args: { playerId: v.id("matchPlayers"), lastGuessAt: v.number() },
+  handler: async (ctx, { playerId, lastGuessAt }) => {
+    const player = await ctx.db.get(playerId);
+    if (!player || !player.active || player.lastGuessAt !== lastGuessAt) return;
+    const [a, b] = await getPlayers(ctx, player.matchId);
+    if (a.guesses.length === 0 && b.guesses.length === 0) {
+      await cancelMatch(ctx, player.matchId, playerId);
+    } else {
+      await finishMatch(ctx, player.matchId, player.opponentId, "timeout", playerId);
     }
-    // Both moved: each has their own turn timeout scheduled.
   },
 });
 
@@ -564,51 +424,40 @@ export const timeoutStaleDelete = internalMutation({
 export const purgeStaleQueue = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const now = Date.now();
-    const queue = await ctx.db.query("matchQueue").collect();
-    for (const entry of queue) {
-      if (isQueueEntryStale(entry, now)) {
-        await ctx.db.delete(entry._id);
-      }
-    }
+    const stale = await ctx.db
+      .query("matchQueue")
+      .withIndex("by_heartbeat", (q) => q.lt("lastHeartbeat", Date.now() - QUEUE_STALE_MS))
+      .collect();
+    for (const entry of stale) await ctx.db.delete(entry._id);
   },
 });
 
 /**
- * Cron safety net: resolves matches whose scheduled timeouts were lost so no
- * player gets stuck in a match that never ends.
+ * Cron safety net: resolves matches whose turn timers were lost so no player
+ * gets stuck in a match that never ends.
  */
-export const resolveExpiredMatches = internalMutation({
+export const sweepExpiredMatches = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
     const active = await ctx.db
-      .query("rankedMatches")
-      .withIndex("by_completion", (q) => q.eq("isCompleted", false))
+      .query("matches")
+      .withIndex("by_status", (q) => q.eq("status", "active"))
       .take(200);
 
     for (const match of active) {
-      const expired = (lastUpdate: number) =>
-        now > lastUpdate + RANKED_TURN_TIMEOUT_MS + SWEEP_GRACE_MS;
-      const expired1 = expired(match.lastUpdateFrom1);
-      const expired2 = expired(match.lastUpdateFrom2);
-      if (!expired1 && !expired2) continue;
-
-      const nobodyMoved = match.attempts1 === 0 && match.attempts2 === 0;
-      if (nobodyMoved) {
-        await ctx.db.delete(match._id);
+      const players = await getPlayers(ctx, match._id);
+      const expired = players.filter(
+        (p) => now > p.lastGuessAt + RANKED_TURN_TIMEOUT_MS + SWEEP_GRACE_MS,
+      );
+      if (expired.length === 0) continue;
+      if (players.every((p) => p.guesses.length === 0)) {
+        await cancelMatch(ctx, match._id);
         continue;
       }
       // Whoever went quiet first loses.
-      const loser: Side =
-        expired1 && expired2
-          ? match.lastUpdateFrom1 <= match.lastUpdateFrom2
-            ? 1
-            : 2
-          : expired1
-            ? 1
-            : 2;
-      await finishMatch(ctx, match, other(loser), "timeout");
+      const loser = expired.sort((x, y) => x.lastGuessAt - y.lastGuessAt)[0];
+      await finishMatch(ctx, match._id, loser.opponentId, "timeout");
     }
   },
 });

@@ -6,7 +6,7 @@ import { MutationCtx, query, QueryCtx } from "./_generated/server";
 import CustomEmail from "./lib/CustomEmail";
 import { DEFAULT_ELO } from "./lib/elo";
 import { avatarUrlFor, checkUsername, isBlockedUsername } from "./lib/username";
-import { randomSuffix } from "./lib/utils";
+import { emptyStats, randomSuffix } from "./lib/utils";
 
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [GitHub, Google, CustomEmail],
@@ -42,6 +42,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         );
       }
 
+      const now = Date.now();
       return await ctx.db.insert("users", {
         email,
         phone,
@@ -49,13 +50,10 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         lowercaseName: name.toLowerCase(),
         image: avatarUrlFor(name),
         elo: DEFAULT_ELO,
-        userStats: {
-          gamesPlayed: 0,
-          wins: 0,
-          winRate: 0,
-          lastSeen: Date.now(),
-        },
-        status: "active",
+        peakElo: DEFAULT_ELO,
+        ranked: emptyStats(),
+        solo: { ...emptyStats(), bestScore: 0 },
+        lastSeenAt: now,
       });
     },
   },
@@ -64,7 +62,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
 export async function isUsernameTaken(ctx: QueryCtx, name: string) {
   const existing = await ctx.db
     .query("users")
-    .withIndex("lowercase_name", (q) => q.eq("lowercaseName", name.toLowerCase()))
+    .withIndex("by_lowercase_name", (q) => q.eq("lowercaseName", name.toLowerCase()))
     .first();
   return existing !== null;
 }
@@ -103,7 +101,7 @@ export const getLoggedInUserHelper = async (ctx: QueryCtx) => {
     return null;
   }
   const user = await ctx.db.get(userId);
-  if (!user || user.status === "deleted") {
+  if (!user || user.deletedAt) {
     return null;
   }
   return user;
