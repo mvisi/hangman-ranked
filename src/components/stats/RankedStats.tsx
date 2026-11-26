@@ -27,6 +27,7 @@ export default function RankedStats() {
   }
 
   const { summary, outcomes, eloHistory, form, rivals } = stats;
+  const remainingPlacement = Math.max(0, summary.placement.required - summary.placement.played);
 
   return (
     <div className="mt-4 space-y-4">
@@ -35,11 +36,24 @@ export default function RankedStats() {
           <RankBadge elo={summary.elo} />
           <p className="tabular mt-2 text-5xl font-bold tracking-tight">{summary.elo}</p>
           <p className="text-muted-foreground text-sm">
-            {summary.position ? `#${summary.position} on the leaderboard` : "Unranked"} · peak{" "}
-            {summary.peakElo}
+            {summary.position
+              ? `#${summary.position} on the leaderboard`
+              : `Placement ${summary.placement.played}/${summary.placement.required}`}{" "}
+            · peak {summary.peakElo}
           </p>
         </div>
-        <TierProgress elo={summary.elo} />
+        <div className="space-y-4">
+          <TierProgress elo={summary.elo} />
+          {remainingPlacement > 0 && (
+            <p className="text-muted-foreground text-xs">
+              Play{" "}
+              <span className="text-foreground font-medium">
+                {remainingPlacement} more {remainingPlacement === 1 ? "match" : "matches"}
+              </span>{" "}
+              to qualify for the Elo leaderboard.
+            </p>
+          )}
+        </div>
       </section>
 
       <StatGrid>

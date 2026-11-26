@@ -6,9 +6,8 @@ import Link from "next/link";
 import { api } from "../../../../convex/_generated/api";
 import { getRankTier } from "../../../../convex/lib/elo";
 import Container, { Page, PageHeader } from "@/components/Container";
-import RankedGame from "@/components/game/RankedGame";
+import RankedGame, { RankedHeaderBadge } from "@/components/game/RankedGame";
 import { RecentRankedGames } from "@/components/RecentGames";
-import { RankBadge } from "@/components/stats/RankBadge";
 import { Button } from "@/components/ui/button";
 
 export const metadata: Metadata = { title: "Ranked" };
@@ -25,7 +24,11 @@ const RankedPage = async () => {
         eyebrow="Ranked"
         title="Challenge other players"
         description="Race an opponent to solve the same word. Wins gain Elo, losses cost it."
-        actions={user ? <RankBadge elo={user.elo} showElo /> : undefined}
+        actions={
+          user ? (
+            <RankedHeaderBadge initialElo={user.elo} initialGames={user.ranked.games} />
+          ) : undefined
+        }
       />
       {user ? (
         <>

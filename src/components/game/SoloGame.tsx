@@ -33,6 +33,7 @@ const SoloGame = () => {
   );
 
   const [starting, setStarting] = useState(false);
+  const [forfeiting, setForfeiting] = useState(false);
   // Games played in this visit, so we can celebrate the one that just ended.
   const [playedIds, setPlayedIds] = useState<string[]>([]);
   if (game && !playedIds.includes(game._id)) {
@@ -47,6 +48,17 @@ const SoloGame = () => {
       toast.error(errorMessage(e, "Couldn't start a game"));
     } finally {
       setStarting(false);
+    }
+  };
+
+  const giveUp = async () => {
+    setForfeiting(true);
+    try {
+      await forfeit();
+    } catch (e) {
+      toast.error(errorMessage(e, "Couldn't give up"));
+    } finally {
+      setForfeiting(false);
     }
   };
 
@@ -80,7 +92,8 @@ const SoloGame = () => {
               variant="ghost"
               size="sm"
               className="text-muted-foreground"
-              onClick={() => forfeit()}
+              disabled={forfeiting}
+              onClick={giveUp}
             >
               <FlagIcon /> Give up
             </Button>
@@ -91,39 +104,59 @@ const SoloGame = () => {
   }
 
   if (last && playedIds.includes(last._id)) {
+    const won = last.result === "won";
+    const tone =
+      last.result === "won"
+        ? "won"
+        : last.result === "abandoned"
+          ? "timeout"
+          : last.result === "forfeit"
+            ? "forfeit"
+            : "lost";
+    const title = won
+      ? last.isPersonalBest
+        ? "New personal best!"
+        : "You got it!"
+      : last.result === "abandoned"
+        ? "Out of time"
+        : last.result === "forfeit"
+          ? "You gave up"
+          : "Not this time";
+    const subtitle = won
+      ? `Solved in ${formatDuration(last.durationMs)}`
+      : last.result === "abandoned"
+        ? "The game ended after a minute without a guess."
+        : "The word was:";
+
     return (
       <Container>
         <GameResult
-          tone={last.isWon ? "won" : last.isAbandoned ? "timeout" : "lost"}
-          title={
-            last.isWon
-              ? last.isPersonalBest
-                ? "New personal best!"
-                : "You got it!"
-              : last.isAbandoned
-                ? "Out of time"
-                : "Not this time"
-          }
-          subtitle={
-            last.isWon
-              ? `Solved in ${formatDuration(last.totalTime)}`
-              : last.isAbandoned
-                ? "The game ended after a minute without a guess."
-                : "The word was:"
-          }
+          tone={tone}
+          title={title}
+          subtitle={subtitle}
           word={last.word}
-          guessedLetters={last.isWon ? undefined : last.guessedLetters}
+          guessedLetters={won ? undefined : last.guessedLetters}
           stats={[
             { label: "Score", value: last.score },
             { label: "Guesses", value: last.attempts },
             { label: "Misses", value: last.mistakes },
-            { label: "Time", value: formatDuration(last.totalTime) },
+            { label: "Time", value: formatDuration(last.durationMs) },
           ]}
           onPlayAgain={start}
         />
       </Container>
     );
   }
+
+  const lastSummary = last
+    ? last.result === "won"
+      ? `won, ${last.score} pts`
+      : last.result === "abandoned"
+        ? "timed out"
+        : last.result === "forfeit"
+          ? "gave up"
+          : "lost"
+    : null;
 
   return (
     <Container>
@@ -134,7 +167,7 @@ const SoloGame = () => {
             <span className="text-foreground font-mono font-semibold uppercase">
               {last.word}
             </span>{" "}
-            · {last.isWon ? `won, ${last.score} pts` : "lost"}
+            · {lastSummary}
           </p>
         )}
       </StartPanel>

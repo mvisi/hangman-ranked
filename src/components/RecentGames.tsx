@@ -70,15 +70,15 @@ export const RecentSoloGames = () => {
           {games.map((game) => (
             <TableRow key={game._id}>
               <TableCell>
-                <ResultBadge result={game.isWon ? "won" : game.isAbandoned ? "abandoned" : "lost"} />
+                <ResultBadge result={game.result} />
               </TableCell>
               <TableCell className="font-mono font-medium uppercase">{game.word}</TableCell>
-              <TableCell className="tabular text-right font-semibold">{game.score ?? 0}</TableCell>
+              <TableCell className="tabular text-right font-semibold">{game.score}</TableCell>
               <TableCell className="tabular hidden text-right sm:table-cell">{game.attempts}</TableCell>
               <TableCell className="tabular hidden text-right sm:table-cell">{game.mistakes}</TableCell>
-              <TableCell className="tabular text-right">{formatDuration(game.totalTime)}</TableCell>
+              <TableCell className="tabular text-right">{formatDuration(game.durationMs)}</TableCell>
               <TableCell className="text-muted-foreground hidden text-right md:table-cell">
-                {formatRelative(game.endTime ?? game._creationTime)}
+                {formatRelative(game.endedAt)}
               </TableCell>
             </TableRow>
           ))}
@@ -116,7 +116,10 @@ export const RankedGamesTable = ({
 }) => {
   const [page, setPage] = useState(0);
   const totalPages = pageSize ? Math.max(1, Math.ceil(games.length / pageSize)) : 1;
-  const rows = pageSize ? games.slice(page * pageSize, (page + 1) * pageSize) : games;
+  const currentPage = Math.min(page, totalPages - 1);
+  const rows = pageSize
+    ? games.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
+    : games;
 
   return (
     <Container>
@@ -174,20 +177,20 @@ export const RankedGamesTable = ({
           <Button
             variant="outline"
             size="icon-sm"
-            disabled={page === 0}
-            onClick={() => setPage((p) => p - 1)}
+            disabled={currentPage === 0}
+            onClick={() => setPage(Math.max(0, currentPage - 1))}
             aria-label="Previous page"
           >
             <ChevronLeftIcon />
           </Button>
           <span className="tabular text-muted-foreground">
-            Page {page + 1} of {totalPages}
+            Page {currentPage + 1} of {totalPages}
           </span>
           <Button
             variant="outline"
             size="icon-sm"
-            disabled={page >= totalPages - 1}
-            onClick={() => setPage((p) => p + 1)}
+            disabled={currentPage >= totalPages - 1}
+            onClick={() => setPage(Math.min(totalPages - 1, currentPage + 1))}
             aria-label="Next page"
           >
             <ChevronRightIcon />

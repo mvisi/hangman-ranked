@@ -4,6 +4,7 @@ import { MedalIcon, TrophyIcon } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { api } from "../../../../convex/_generated/api";
+import { PLACEMENT_MATCHES } from "../../../../convex/lib/elo";
 import { Page, PageHeader } from "@/components/Container";
 import { PlayerLink } from "@/components/RecentGames";
 import { RankBadge } from "@/components/stats/RankBadge";
@@ -21,9 +22,12 @@ import { cn, formatDuration, formatPercent, formatRelative } from "@/lib/utils";
 export const metadata: Metadata = { title: "Leaderboard" };
 
 const BOARDS = {
-  score: { label: "High scores", description: "The 100 highest-scoring solo games." },
-  fastest: { label: "Fastest solves", description: "The 100 quickest solo wins." },
-  elo: { label: "Ranked", description: "The top 100 players by Elo rating." },
+  score: { label: "High scores", description: "The top 100 players by their highest-scoring solo game." },
+  fastest: { label: "Fastest solves", description: "The top 100 players by their quickest solo win." },
+  elo: {
+    label: "Ranked",
+    description: `The top 100 placed players by Elo rating (${PLACEMENT_MATCHES} ranked matches required).`,
+  },
 } as const;
 type Board = keyof typeof BOARDS;
 
@@ -35,6 +39,11 @@ const LeaderboardPage = async ({ searchParams }: PageProps<"/leaderboard">) => {
   const me = token
     ? await fetchQuery(api.auth.loggedInUser, {}, { token }).catch(() => null)
     : null;
+
+  const remainingPlacement =
+    board === "elo" && me && me.ranked.games < PLACEMENT_MATCHES
+      ? PLACEMENT_MATCHES - me.ranked.games
+      : 0;
 
   return (
     <Page>
@@ -59,6 +68,21 @@ const LeaderboardPage = async ({ searchParams }: PageProps<"/leaderboard">) => {
           </Link>
         ))}
       </nav>
+      {remainingPlacement > 0 && me && (
+        <div className="bg-card mt-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border px-5 py-3 text-sm shadow-sm">
+          <p className="text-muted-foreground">
+            Placement progress:{" "}
+            <span className="text-foreground tabular font-semibold">
+              {me.ranked.games}/{PLACEMENT_MATCHES}
+            </span>{" "}
+            — play {remainingPlacement} more {remainingPlacement === 1 ? "match" : "matches"} to
+            appear here.
+          </p>
+          <Link href="/ranked" className="text-primary font-medium hover:underline">
+            Play ranked →
+          </Link>
+        </div>
+      )}
       <div className="bg-card mt-4 overflow-hidden rounded-2xl border shadow-sm">
         {board === "elo" ? (
           <EloBoard myName={me?.name} />
@@ -109,7 +133,13 @@ function EmptyBoard({ text }: { text: string }) {
 
 async function EloBoard({ myName }: { myName?: string }) {
   const players = await fetchQuery(api.leaderboard.getEloLeaderboard, {});
-  if (players.length === 0) return <EmptyBoard text="No ranked matches played yet. Be the first!" />;
+  if (players.length === 0) {
+    return (
+      <EmptyBoard
+        text={`No placed players yet. Complete ${PLACEMENT_MATCHES} ranked matches to qualify!`}
+      />
+    );
+  }
 
   return (
     <Table>

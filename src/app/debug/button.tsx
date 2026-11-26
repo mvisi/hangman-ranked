@@ -2,8 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ActionButton = ({ func }: { func?: any }) => {
+const ActionButton = ({ func }: { func?: () => Promise<void> | void }) => {
   if (!func) {
     return (
       <Button
@@ -15,6 +14,6 @@ const ActionButton = ({ func }: { func?: any }) => {
       </Button>
     );
   }
-  return <Button onClick={() => func()}>ThrowServerError</Button>;
+  return <Button onClick={() => void func()}>ThrowServerError</Button>;
 };
 export default ActionButton;

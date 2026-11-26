@@ -3,11 +3,10 @@
 import { useMutation, useQuery } from "convex/react";
 import { FunctionReturnType } from "convex/server";
 import { FlagIcon, SwordsIcon, UsersIcon, XIcon } from "lucide-react";
-import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api } from "../../../convex/_generated/api";
-import { getRankTier } from "../../../convex/lib/elo";
+import { getRankTier, PLACEMENT_MATCHES } from "../../../convex/lib/elo";
 import { MAX_MISTAKES, RANKED_TURN_TIMEOUT_MS } from "../../../convex/lib/game";
 import GameBoard from "./GameBoard";
 import GameResult, { ResultTone } from "./GameResult";
@@ -15,6 +14,8 @@ import LivesMeter from "./LivesMeter";
 import StartPanel from "./StartPanel";
 import TurnTimer from "./TurnTimer";
 import Container from "@/components/Container";
+import { PlayerLink } from "@/components/RecentGames";
+import { RankBadge } from "@/components/stats/RankBadge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,7 +31,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useElapsed } from "@/hooks/useServerClock";
-import { cn, errorMessage, formatClock, formatSigned, profileHref } from "@/lib/utils";
+import { cn, errorMessage, formatClock, formatSigned } from "@/lib/utils";
 
 const HEARTBEAT_MS = 10_000;
 
@@ -43,7 +44,32 @@ const RANKED_RULES = [
 type ActiveMatch = NonNullable<FunctionReturnType<typeof api.ranked.getActiveMatch>>;
 type LastResult = NonNullable<FunctionReturnType<typeof api.ranked.getLastMatchResult>>;
 
+/** Live Elo + placement badge for the ranked page header. */
+export function RankedHeaderBadge({
+  initialElo,
+  initialGames,
+}: {
+  initialElo: number;
+  initialGames: number;
+}) {
+  const user = useQuery(api.auth.loggedInUser);
+  const elo = user?.elo ?? initialElo;
+  const games = user?.ranked.games ?? initialGames;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <RankBadge elo={elo} showElo />
+      {games < PLACEMENT_MATCHES && (
+        <span className="bg-muted text-muted-foreground tabular rounded-full px-2.5 py-1 text-xs font-medium">
+          Placement {games}/{PLACEMENT_MATCHES}
+        </span>
+      )}
+    </div>
+  );
+}
+
 const RankedGame = () => {
+  const user = useQuery(api.auth.loggedInUser);
   const queue = useQuery(api.ranked.queueInfo);
   const match = useQuery(api.ranked.getActiveMatch);
   const last = useQuery(api.ranked.getLastMatchResult);
@@ -53,16 +79,22 @@ const RankedGame = () => {
   const heartbeat = useMutation(api.ranked.queueHeartbeat);
 
   const [joining, setJoining] = useState(false);
+  const [leaving, setLeaving] = useState(false);
   const [playedIds, setPlayedIds] = useState<string[]>([]);
   if (match && !playedIds.includes(match._id)) {
     setPlayedIds([...playedIds, match._id]);
   }
 
   const isInQueue = !!queue?.isInQueue && !match;
+  const isInQueueRef = useRef(isInQueue);
+  useEffect(() => {
+    isInQueueRef.current = isInQueue;
+  }, [isInQueue]);
 
   // Keep our queue entry alive; leave the queue when navigating away.
   useEffect(() => {
     if (!isInQueue) return;
+    void heartbeat();
     const interval = setInterval(() => void heartbeat(), HEARTBEAT_MS);
     const onHide = () => void leaveMatchmaking();
     window.addEventListener("pagehide", onHide);
@@ -73,7 +105,11 @@ const RankedGame = () => {
   }, [isInQueue, heartbeat, leaveMatchmaking]);
 
   useEffect(() => {
-    return () => void leaveMatchmaking();
+    return () => {
+      if (isInQueueRef.current) {
+        void leaveMatchmaking();
+      }
+    };
   }, [leaveMatchmaking]);
 
   const join = async () => {
@@ -84,6 +120,17 @@ const RankedGame = () => {
       toast.error(errorMessage(e, "Couldn't join matchmaking"));
     } finally {
       setJoining(false);
+    }
+  };
+
+  const cancelQueue = async () => {
+    setLeaving(true);
+    try {
+      await leaveMatchmaking();
+    } catch (e) {
+      toast.error(errorMessage(e, "Couldn't leave matchmaking"));
+    } finally {
+      setLeaving(false);
     }
   };
 
@@ -105,19 +152,27 @@ const RankedGame = () => {
         <QueueView
           since={queue.queueEntryTime}
           playersSearching={queue.playersSearching}
-          onCancel={() => void leaveMatchmaking()}
+          leaving={leaving}
+          onCancel={cancelQueue}
         />
       </Container>
     );
   }
 
+  const rankedGames = user?.ranked.games;
+
   if (last && playedIds.includes(last._id)) {
     return (
       <Container>
-        <MatchResult result={last} onPlayAgain={join} />
+        <MatchResult result={last} rankedGames={rankedGames} onPlayAgain={join} />
       </Container>
     );
   }
+
+  const remainingPlacement =
+    rankedGames !== undefined && rankedGames < PLACEMENT_MATCHES
+      ? PLACEMENT_MATCHES - rankedGames
+      : 0;
 
   return (
     <Container>
@@ -135,6 +190,12 @@ const RankedGame = () => {
             searching right now
           </p>
         )}
+        {remainingPlacement > 0 && (
+          <p className="text-muted-foreground text-xs">
+            Placement: play {remainingPlacement} more{" "}
+            {remainingPlacement === 1 ? "match" : "matches"} to appear on the leaderboard.
+          </p>
+        )}
       </StartPanel>
     </Container>
   );
@@ -143,10 +204,12 @@ const RankedGame = () => {
 function QueueView({
   since,
   playersSearching,
+  leaving,
   onCancel,
 }: {
   since?: number;
   playersSearching: number;
+  leaving: boolean;
   onCancel: () => void;
 }) {
   const elapsed = useElapsed(since);
@@ -173,8 +236,8 @@ function QueueView({
           ? `${playersSearching} other ${playersSearching === 1 ? "player" : "players"} searching`
           : "You're the only one searching. Invite a friend!"}
       </p>
-      <Button variant="outline" onClick={onCancel}>
-        <XIcon /> Cancel
+      <Button variant="outline" disabled={leaving} onClick={onCancel}>
+        <XIcon /> {leaving ? "Leaving…" : "Cancel"}
       </Button>
     </div>
   );
@@ -244,7 +307,15 @@ function MatchView({ match }: { match: ActiveMatch }) {
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>Keep playing</AlertDialogCancel>
-                <AlertDialogAction onClick={() => void forfeit()}>Resign</AlertDialogAction>
+                <AlertDialogAction
+                  onClick={() => {
+                    forfeit().catch((e) =>
+                      toast.error(errorMessage(e, "Couldn't resign the match")),
+                    );
+                  }}
+                >
+                  Resign
+                </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
@@ -323,7 +394,15 @@ function PlayerCard({
   );
 }
 
-function MatchResult({ result, onPlayAgain }: { result: LastResult; onPlayAgain: () => void }) {
+function MatchResult({
+  result,
+  rankedGames,
+  onPlayAgain,
+}: {
+  result: LastResult;
+  rankedGames?: number;
+  onPlayAgain: () => void;
+}) {
   const reasons: Record<string, [string, string]> = {
     solved: ["You solved it first.", `${result.opponentName} solved it first.`],
     failed: [`${result.opponentName} ran out of lives.`, "You ran out of lives."],
@@ -339,6 +418,15 @@ function MatchResult({ result, onPlayAgain }: { result: LastResult; onPlayAgain:
         ? "forfeit"
         : "lost";
 
+  const placementNote =
+    rankedGames === undefined
+      ? null
+      : rankedGames < PLACEMENT_MATCHES
+        ? `Placement ${rankedGames}/${PLACEMENT_MATCHES} · ${PLACEMENT_MATCHES - rankedGames} more to join the leaderboard`
+        : rankedGames === PLACEMENT_MATCHES
+          ? "Placement complete — you're now on the Elo leaderboard!"
+          : null;
+
   return (
     <GameResult
       tone={tone}
@@ -346,22 +434,23 @@ function MatchResult({ result, onPlayAgain }: { result: LastResult; onPlayAgain:
       subtitle={
         <>
           {result.won ? winText : loseText} vs{" "}
-          <Link href={profileHref(result.opponentName)} className="text-foreground font-medium hover:underline">
-            {result.opponentName}
-          </Link>
+          <PlayerLink name={result.opponentName} className="text-foreground" />
         </>
       }
       word={result.word}
       guessedLetters={result.guessedLetters}
       highlight={
-        <p
-          className={cn(
-            "tabular rounded-full px-4 py-1.5 text-lg font-bold",
-            result.eloChange >= 0 ? "bg-success-soft text-success" : "bg-danger-soft text-danger",
-          )}
-        >
-          {formatSigned(result.eloChange)} Elo · now {result.eloAfter}
-        </p>
+        <div className="flex flex-col items-center gap-2">
+          <p
+            className={cn(
+              "tabular rounded-full px-4 py-1.5 text-lg font-bold",
+              result.eloChange >= 0 ? "bg-success-soft text-success" : "bg-danger-soft text-danger",
+            )}
+          >
+            {formatSigned(result.eloChange)} Elo · now {result.eloAfter}
+          </p>
+          {placementNote && <p className="text-muted-foreground text-xs">{placementNote}</p>}
+        </div>
       }
       stats={[
         { label: "Rank", value: getRankTier(result.eloAfter).name },

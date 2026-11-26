@@ -1,5 +1,11 @@
-import ActionButton from "./button";
+import type { Metadata } from "next";
 import Link from "next/link";
+import ActionButton from "./button";
+
+export const metadata: Metadata = {
+  title: "Debug",
+  robots: { index: false, follow: false },
+};
 
 const throwServerError = async () => {
   "use server";
@@ -8,11 +14,11 @@ const throwServerError = async () => {
 
 export default function DebugPage() {
   return (
-    <main className="mx-auto w-3/4 pt-10 prose max-w-3/4">
+    <main className="prose prose-zinc dark:prose-invert mx-auto max-w-3xl px-6 py-10">
       <h3 className="text-destructive">
         Warning: This page is for debugging purposes only.{" "}
         <Link href="/">Go back</Link> if you don&apos;t know what you&apos;re
-        doing. Everything you do here will be at your own risk
+        doing. Everything you do here will be at your own risk.
       </h3>
       <section>
         <h4>

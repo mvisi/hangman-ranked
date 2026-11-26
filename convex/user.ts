@@ -218,8 +218,9 @@ export const getRecentRankedGames = query({
   args: { userId: v.optional(v.id("users")), limit: v.optional(v.number()) },
   handler: async (ctx, { userId, limit = 10 }) => {
     const user = userId ? await ctx.db.get(userId) : await getLoggedInUserHelper(ctx);
-    if (!user) return null;
-    return (await getRankedHistory(ctx, user)).slice(-limit).reverse();
+    if (!user || user.deletedAt) return null;
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    return (await getRankedHistory(ctx, user)).slice(-safeLimit).reverse();
   },
 });
 

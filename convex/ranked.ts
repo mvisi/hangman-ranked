@@ -134,10 +134,6 @@ export async function forfeitActiveMatch(ctx: MutationCtx, userId: Id<"users">) 
   if (player) await finishMatch(ctx, player.matchId, player.opponentId, "forfeit");
 }
 
-function isStale(entry: Doc<"matchQueue">, now: number) {
-  return now - entry.lastHeartbeat > QUEUE_STALE_MS;
-}
-
 /* -------------------------------------------------------------------------- */
 /*                                 Matchmaking                                */
 /* -------------------------------------------------------------------------- */
@@ -170,6 +166,7 @@ export const enterMatchmaking = mutation({
     ).sort((a, b) => Math.abs(a.elo - user.elo) - Math.abs(b.elo - user.elo));
 
     for (const entry of candidates) {
+      if (entry.userId === user._id) continue;
       await ctx.db.delete(entry._id);
       const opponent = await ctx.db.get(entry.userId);
       if (!opponent || opponent.deletedAt || (await getActivePlayerFor(ctx, opponent._id))) {
@@ -285,7 +282,7 @@ export const getActiveMatch = query({
     const me = await getActivePlayerFor(ctx, user._id);
     if (!me) return null;
     const match = await ctx.db.get(me.matchId);
-    if (!match) return null;
+    if (!match || match.status !== "active") return null;
     const them = (await getPlayers(ctx, match._id)).find((p) => p._id !== me._id)!;
     const opponent = await ctx.db.get(them.userId);
     const state = deriveState(match.word, me.guesses);
@@ -323,7 +320,8 @@ export const makeGuess = mutation({
     const user = await requireUser(ctx);
     const me = await getActivePlayerFor(ctx, user._id);
     if (!me) throw new ConvexError("No active match found");
-    const match = (await ctx.db.get(me.matchId))!;
+    const match = await ctx.db.get(me.matchId);
+    if (!match || match.status !== "active") throw new ConvexError("No active match found");
 
     let outcome;
     try {

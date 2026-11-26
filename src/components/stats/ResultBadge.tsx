@@ -13,7 +13,7 @@ export function ResultBadge({
   result,
   reason,
 }: {
-  result: "won" | "lost" | "abandoned";
+  result: "won" | "lost" | "abandoned" | "forfeit";
   /** Ranked end reason, shown as a tooltip. */
   reason?: string;
 }) {
@@ -22,10 +22,17 @@ export function ResultBadge({
       ? CheckIcon
       : result === "abandoned" || reason === "timeout"
         ? TimerOffIcon
-        : reason === "forfeit"
+        : result === "forfeit" || reason === "forfeit"
           ? FlagIcon
           : XIcon;
-  const label = result === "won" ? "Won" : result === "abandoned" ? "Timed out" : "Lost";
+  const label =
+    result === "won"
+      ? "Won"
+      : result === "abandoned"
+        ? "Timed out"
+        : result === "forfeit"
+          ? "Gave up"
+          : "Lost";
 
   return (
     <span

@@ -62,14 +62,14 @@ async function finishGame(
   if (game.timeoutJobId && !fromTimer) {
     await ctx.scheduler.cancel(game.timeoutJobId);
   }
-  const now = Date.now();
+  const now = patch.lastGuessAt ?? Date.now();
   const score = patch.score ?? 0;
   await ctx.db.patch(game._id, {
     ...patch,
     status,
     score,
     endedAt: now,
-    durationMs: now - game.startedAt,
+    durationMs: Math.max(0, now - game.startedAt),
     timeoutJobId: undefined,
   });
 

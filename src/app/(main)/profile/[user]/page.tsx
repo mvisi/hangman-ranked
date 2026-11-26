@@ -38,7 +38,12 @@ const ProfilePage = async ({ params }: PageProps<"/profile/[user]">) => {
 
   if (!profile) notFound();
 
-  const losses = profile.userStats.gamesPlayed - profile.userStats.wins;
+  const losses = profile.ranked.games - profile.ranked.wins;
+  const rankLabel = profile.rank
+    ? `#${profile.rank} worldwide`
+    : profile.placement.played > 0
+      ? `Placement (${profile.placement.played}/${profile.placement.required})`
+      : "Unranked";
 
   return (
     <Page>
@@ -55,9 +60,7 @@ const ProfilePage = async ({ params }: PageProps<"/profile/[user]">) => {
               <h1 className="truncate text-2xl font-bold tracking-tight sm:text-3xl">{profile.name}</h1>
               <div className="flex flex-wrap items-center gap-2">
                 <RankBadge elo={profile.elo} showElo />
-                <span className="text-muted-foreground text-sm font-medium">
-                  {profile.rank ? `#${profile.rank} worldwide` : "Unranked"}
-                </span>
+                <span className="text-muted-foreground text-sm font-medium">{rankLabel}</span>
               </div>
             </div>
           </div>
@@ -88,14 +91,19 @@ const ProfilePage = async ({ params }: PageProps<"/profile/[user]">) => {
         <StatTile
           icon={SwordsIcon}
           label="Ranked record"
-          value={`${profile.userStats.wins}–${losses}`}
-          hint={`${formatPercent(profile.userStats.winRate)} win rate`}
+          value={`${profile.ranked.wins}–${losses}`}
+          hint={`${formatPercent(profile.ranked.winRate)} win rate`}
         />
-        <StatTile icon={FlameIcon} label="Ranked streak" value={profile.currentStreak} />
         <StatTile
-          icon={profile.personalScoreRecord ? StarIcon : PercentIcon}
+          icon={FlameIcon}
+          label="Ranked streak"
+          value={profile.ranked.streak}
+          hint={`Best: ${profile.ranked.bestStreak}`}
+        />
+        <StatTile
+          icon={profile.solo.bestScore ? StarIcon : PercentIcon}
           label="Solo best"
-          value={profile.personalScoreRecord || "–"}
+          value={profile.solo.bestScore || "–"}
           hint={`${profile.solo.games} solo games · ${formatPercent(profile.solo.winRate)} won`}
         />
       </StatGrid>
