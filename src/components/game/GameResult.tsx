@@ -73,11 +73,11 @@ const GameResult = ({
 
       {highlight}
 
-      <dl className="grid w-full max-w-md grid-cols-2 gap-2 sm:grid-cols-4">
+      <dl className="grid w-full max-w-xl grid-cols-2 gap-2 sm:grid-cols-4">
         {stats.map((stat) => (
-          <div key={stat.label} className="bg-muted/40 rounded-lg border px-3 py-2">
+          <div key={stat.label} className="bg-muted/40 min-w-0 rounded-lg border px-3 py-2">
             <dt className="text-muted-foreground text-xs">{stat.label}</dt>
-            <dd className="tabular text-lg font-semibold">{stat.value}</dd>
+            <dd className="tabular truncate text-base font-semibold">{stat.value}</dd>
           </div>
         ))}
       </dl>

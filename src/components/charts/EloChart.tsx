@@ -36,7 +36,7 @@ export function EloChart({
     >
       <div className="h-64 sm:h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+          <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="elo-fill" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.25} />
@@ -70,6 +70,7 @@ export function EloChart({
               stroke="var(--chart-1)"
               strokeWidth={2}
               fill="url(#elo-fill)"
+              isAnimationActive={false}
               dot={data.length <= 30 ? { r: 3, strokeWidth: 0, fill: "var(--chart-1)" } : false}
               activeDot={{ r: 5, stroke: "var(--card)", strokeWidth: 2 }}
             />

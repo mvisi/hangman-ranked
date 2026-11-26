@@ -64,7 +64,7 @@ export function ScoreTrendChart({ history }: { history: HistoryPoint[] }) {
     >
       <div className="h-64 sm:h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+          <ComposedChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid {...gridProps} />
             <XAxis dataKey="game" {...axisProps} minTickGap={16} />
             <YAxis {...axisProps} width={44} allowDecimals={false} />
@@ -76,13 +76,20 @@ export function ScoreTrendChart({ history }: { history: HistoryPoint[] }) {
                   label={props.label} series={SCORE_SERIES} formatLabel={gameLabel} />
               )}
             />
-            <Bar dataKey="score" fill="var(--chart-1)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+            <Bar
+              dataKey="score"
+              fill="var(--chart-1)"
+              radius={[4, 4, 0, 0]}
+              maxBarSize={28}
+              isAnimationActive={false}
+            />
             <Line
               dataKey="trend"
               type="monotone"
               stroke="var(--chart-2)"
               strokeWidth={2}
               dot={false}
+              isAnimationActive={false}
               activeDot={{ r: 4, stroke: "var(--card)", strokeWidth: 2 }}
             />
           </ComposedChart>
@@ -129,10 +136,10 @@ export function GuessingChart({ history }: { history: HistoryPoint[] }) {
       <div className="h-64 sm:h-72">
         <ResponsiveContainer width="100%" height="100%">
           {view === "guesses" ? (
-            <BarChart data={history} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+            <BarChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid {...gridProps} />
               <XAxis dataKey="game" {...axisProps} minTickGap={16} />
-              <YAxis {...axisProps} width={44} allowDecimals={false} />
+              <YAxis {...axisProps} width={36} allowDecimals={false} />
               <Tooltip
                 cursor={{ fill: "var(--muted)", opacity: 0.6 }}
                 content={(props) => (
@@ -141,11 +148,28 @@ export function GuessingChart({ history }: { history: HistoryPoint[] }) {
                   label={props.label} series={GUESS_SERIES} formatLabel={gameLabel} />
                 )}
               />
-              <Bar dataKey="correct" stackId="g" fill="var(--chart-1)" stroke="var(--card)" strokeWidth={1} maxBarSize={28} />
-              <Bar dataKey="wrong" stackId="g" fill="var(--chart-2)" stroke="var(--card)" strokeWidth={1} radius={[4, 4, 0, 0]} maxBarSize={28} />
+              <Bar
+                dataKey="correct"
+                stackId="g"
+                fill="var(--chart-1)"
+                stroke="var(--card)"
+                strokeWidth={1}
+                maxBarSize={28}
+                isAnimationActive={false}
+              />
+              <Bar
+                dataKey="wrong"
+                stackId="g"
+                fill="var(--chart-2)"
+                stroke="var(--card)"
+                strokeWidth={1}
+                radius={[4, 4, 0, 0]}
+                maxBarSize={28}
+                isAnimationActive={false}
+              />
             </BarChart>
           ) : (
-            <LineChart data={history} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+            <LineChart data={history} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid {...gridProps} />
               <XAxis dataKey="game" {...axisProps} minTickGap={16} />
               <YAxis {...axisProps} width={44} domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
@@ -167,6 +191,7 @@ export function GuessingChart({ history }: { history: HistoryPoint[] }) {
                 type="monotone"
                 stroke="var(--chart-1)"
                 strokeWidth={2}
+                isAnimationActive={false}
                 dot={history.length <= 30 ? { r: 3, strokeWidth: 0, fill: "var(--chart-1)" } : false}
                 activeDot={{ r: 5, stroke: "var(--card)", strokeWidth: 2 }}
               />
@@ -205,10 +230,10 @@ export function LetterChart({
     >
       <div className="h-56 sm:h-64">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={letters} margin={{ top: 8, right: 4, left: -20, bottom: 0 }}>
+          <BarChart data={letters} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
             <CartesianGrid {...gridProps} />
             <XAxis dataKey="letter" {...axisProps} interval={0} tick={{ ...axisProps.tick, fontSize: 11 }} />
-            <YAxis {...axisProps} width={44} allowDecimals={false} />
+            <YAxis {...axisProps} width={36} allowDecimals={false} />
             <Tooltip
               cursor={{ fill: "var(--muted)", opacity: 0.6 }}
               content={(props) => (
@@ -217,8 +242,23 @@ export function LetterChart({
                   label={props.label} series={LETTER_SERIES} formatLabel={(l) => `Letter ${l}`} />
               )}
             />
-            <Bar dataKey="hits" stackId="l" fill="var(--chart-1)" stroke="var(--card)" strokeWidth={1} />
-            <Bar dataKey="misses" stackId="l" fill="var(--chart-2)" stroke="var(--card)" strokeWidth={1} radius={[4, 4, 0, 0]} />
+            <Bar
+              dataKey="hits"
+              stackId="l"
+              fill="var(--chart-1)"
+              stroke="var(--card)"
+              strokeWidth={1}
+              isAnimationActive={false}
+            />
+            <Bar
+              dataKey="misses"
+              stackId="l"
+              fill="var(--chart-2)"
+              stroke="var(--card)"
+              strokeWidth={1}
+              radius={[4, 4, 0, 0]}
+              isAnimationActive={false}
+            />
           </BarChart>
         </ResponsiveContainer>
       </div>

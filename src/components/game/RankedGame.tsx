@@ -403,11 +403,24 @@ function MatchResult({
   rankedGames?: number;
   onPlayAgain: () => void;
 }) {
-  const reasons: Record<string, [string, string]> = {
-    solved: ["You solved it first.", `${result.opponentName} solved it first.`],
-    failed: [`${result.opponentName} ran out of lives.`, "You ran out of lives."],
-    timeout: [`${result.opponentName} ran out of time.`, "You ran out of time."],
-    forfeit: [`${result.opponentName} resigned.`, "You resigned."],
+  const opponent = <PlayerLink name={result.opponentName} className="text-foreground" />;
+  const reasons: Record<string, [React.ReactNode, React.ReactNode]> = {
+    solved: [
+      <>You solved it first against {opponent}.</>,
+      <>{opponent} solved it first.</>,
+    ],
+    failed: [
+      <>{opponent} ran out of lives.</>,
+      <>You ran out of lives against {opponent}.</>,
+    ],
+    timeout: [
+      <>{opponent} ran out of time.</>,
+      <>You ran out of time against {opponent}.</>,
+    ],
+    forfeit: [
+      <>{opponent} resigned.</>,
+      <>You resigned against {opponent}.</>,
+    ],
   };
   const [winText, loseText] = reasons[result.endReason ?? "solved"];
   const tone: ResultTone = result.won
@@ -431,12 +444,7 @@ function MatchResult({
     <GameResult
       tone={tone}
       title={result.won ? "Victory!" : "Defeat"}
-      subtitle={
-        <>
-          {result.won ? winText : loseText} vs{" "}
-          <PlayerLink name={result.opponentName} className="text-foreground" />
-        </>
-      }
+      subtitle={result.won ? winText : loseText}
       word={result.word}
       guessedLetters={result.guessedLetters}
       highlight={
